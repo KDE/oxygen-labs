@@ -1,0 +1,1383 @@
+diff --git a/README.md b/README.md
+index c342604..ad71952 100644
+--- a/README.md
++++ b/README.md
+@@ -20,3 +20,45 @@ libnotificationmanager is responsible for listing notifications, closing them
+ and interacting with them in Plasma. This class provides a %Qt model for jobs:
+ NotificationManager::JobsModel. As well as a %Qt model for notifications and
+ jobs: NotificationManager::Notifications.
++
++### Declarative icon configuration
++
++The Icons KCM discovers `X-KDE-IconConfiguration=DeclarativeV1` in a theme's
++index and validates its adjacent `icon-settings.json` with the shared parser.
++The schema describes a title, plain-text description and pages containing
++checkbox controls. Each checkbox defines a stable ID, label and boolean default.
++A separate `installation` request selects `userThemeCopy` and lists rules.
++Each rule has a boolean `when` condition referencing a control and an
++`omitDirectories` operation naming registered, confined theme paths.
++The theme, not the checkbox widget, defines when installation changes occur.
++Theme authors can change the UI and actions as data without compilation.
++
++The pencil invokes the generic `plasma-icon-theme-config` renderer from Plasma's
++fixed install libexec directory, never from a theme-supplied command or plugin.
++The renderer uses the session's Widgets appearance and creates a same-ID
++user override, preserving the theme's name and translations. No separate
++configured-theme tile is created. Save applies the artwork and the theme
++selection immediately; enclosing Apply is not needed. Cancel does not write.
++Existing users are notified and icon caches invalidated after Save.
++For user-installed themes, the original is retained in the hidden
++`icons/.icon-config-sources/<theme-id>/` directory so omitted artwork can be
++restored. Unrelated same-ID user themes are not overwritten. Older hashed
++configured themes can still be read during migration.
++
++Only image files and fixed metadata are copied. Output contains no symlinks or
++executable files, and its destination cannot be set by declarations. External
++source symlinks, directory symlinks, traversal, absolute paths, unknown fields,
++unsupported operations, overlapping actions and excessive data are rejected.
++Copying uses a private temporary directory, lock, ownership marker and rollback
++on activation failure. Settings are INI entries within the generated index.
++No system-installed theme is modified and no privilege escalation is used.
++Read-only system-wide themes are supported: only user-copy destinations must
++be writable, and copied files receive user-writable permissions.
++Artwork is streamed into private staging without a durable sync for every
++image. Interactive Save runs in a worker thread with disabled controls and a
++saving indicator; the dialog remains responsive and cannot close mid-save.
++The original source path is shown to distinguish system and user installations.
++
++The supported v1 renderer deliberately has a narrow vocabulary; it is not a
++general scripting or UI language. Normal KIconThemes fallback is unchanged.
++This is prototype support requiring upstream agreement on metadata/schema.
+diff --git a/kcms/icons/CMakeLists.txt b/kcms/icons/CMakeLists.txt
+index e3ba195..3ce419f 100644
+--- a/kcms/icons/CMakeLists.txt
++++ b/kcms/icons/CMakeLists.txt
+@@ -2,7 +2,7 @@ add_definitions(-DTRANSLATION_DOMAIN=\"kcm_icons\")
+ 
+ kcmutils_add_qml_kcm(kcm_icons)
+ 
+-target_sources(kcm_icons PRIVATE main.cpp iconsmodel.cpp iconssettings.cpp ../kcms-common.cpp)
++target_sources(kcm_icons PRIVATE main.cpp iconsmodel.cpp iconssettings.cpp themeconfig.cpp ../kcms-common.cpp)
+ kcmutils_generate_module_data(kcm_icons
+     MODULE_DATA_HEADER iconsdata.h
+     MODULE_DATA_CLASS_NAME IconsData
+@@ -45,3 +45,9 @@ install( FILES ${CMAKE_BINARY_DIR}/icons.knsrc DESTINATION ${KDE_INSTALL_KNSRCDI
+ 
+ install(TARGETS plasma-changeicons DESTINATION ${KDE_INSTALL_LIBEXECDIR} )
+ 
++add_executable(plasma-icon-theme-config themeconfigdialog.cpp themeconfig.cpp)
++target_link_libraries(plasma-icon-theme-config PRIVATE Qt::Widgets KF6::ConfigCore)
++install(TARGETS plasma-icon-theme-config DESTINATION ${KDE_INSTALL_LIBEXECDIR})
++if(BUILD_TESTING)
++    add_subdirectory(autotests)
++endif()
+diff --git a/kcms/icons/iconsmodel.cpp b/kcms/icons/iconsmodel.cpp
+index 4e4448a..3c2cc2a 100644
+--- a/kcms/icons/iconsmodel.cpp
++++ b/kcms/icons/iconsmodel.cpp
+@@ -12,13 +12,19 @@
+ 
+ #include "iconsmodel.h"
+ 
++#include <KConfig>
++#include <KConfigGroup>
+ #include <QCollator>
++#include <QDir>
+ #include <QFileIconProvider>
++#include <QStandardPaths>
+ 
+ #include <KIconTheme>
+ #include <algorithm>
+ 
++#include "config.h"
+ #include "iconssettings.h"
++#include "themeconfig.h"
+ 
+ static const QStringList themesToIgnore = {
+     // These GNOME icon themes don't implement the FDO icon naming spec, so using
+@@ -28,6 +34,24 @@ static const QStringList themesToIgnore = {
+     QStringLiteral("Adwaita Dark"),
+     QStringLiteral("HighContrast")};
+ 
++static bool supportsConfiguration(const QString &themeDirectory)
++{
++    if (QStandardPaths::findExecutable(QStringLiteral("plasma-icon-theme-config"), {QStringLiteral(CMAKE_INSTALL_FULL_LIBEXECDIR)}).isEmpty()) {
++        return false;
++    }
++    ThemeConfiguration configuration;
++    QString error;
++    KConfig index(themeDirectory + QStringLiteral("index.theme"), KConfig::SimpleConfig);
++    if (KConfigGroup(&index, QStringLiteral("Icon Theme")).readEntry("X-KDE-IconConfiguration", QString()).isEmpty()) {
++        return false;
++    }
++    if (!readThemeConfiguration(themeDirectory, configuration, error)) {
++        qWarning() << "Invalid icon configuration in" << themeDirectory << error;
++        return false;
++    }
++    return true;
++}
++
+ IconsModel::IconsModel(IconsSettings *iconsSettings, QObject *parent)
+     : QAbstractListModel(parent)
+     , m_settings(iconsSettings)
+@@ -64,6 +88,8 @@ QVariant IconsModel::data(const QModelIndex &index, int role) const
+         return item.removable;
+     case PendingDeletionRole:
+         return item.pendingDeletion;
++    case ConfigurableRole:
++        return item.configurable;
+     }
+ 
+     return {};
+@@ -105,6 +131,7 @@ QHash<int, QByteArray> IconsModel::roleNames() const
+         {ThemeNameRole, QByteArrayLiteral("themeName")},
+         {RemovableRole, QByteArrayLiteral("removable")},
+         {PendingDeletionRole, QByteArrayLiteral("pendingDeletion")},
++        {ConfigurableRole, QByteArrayLiteral("configurable")},
+     };
+ }
+ 
+@@ -131,13 +158,12 @@ void IconsModel::load()
+             continue;
+         }
+ 
+-        IconsModelData item{
+-            theme.name(),
+-            themeName,
+-            theme.description(),
+-            themeName != KIconTheme::defaultThemeName() && QFileInfo(theme.dir()).isWritable(),
+-            false // pending deletion
+-        };
++        IconsModelData item{theme.name(),
++                            themeName,
++                            theme.description(),
++                            themeName != KIconTheme::defaultThemeName() && QFileInfo(theme.dir()).isWritable(),
++                            false, // pending deletion
++                            supportsConfiguration(theme.dir())};
+ 
+         m_data.append(item);
+     }
+diff --git a/kcms/icons/iconsmodel.h b/kcms/icons/iconsmodel.h
+index fdfc6cb..aaa5c96 100644
+--- a/kcms/icons/iconsmodel.h
++++ b/kcms/icons/iconsmodel.h
+@@ -22,6 +22,7 @@ struct IconsModelData {
+     QString description;
+     bool removable;
+     bool pendingDeletion;
++    bool configurable;
+ };
+ Q_DECLARE_TYPEINFO(IconsModelData, Q_RELOCATABLE_TYPE);
+ 
+@@ -38,6 +39,7 @@ public:
+         DescriptionRole,
+         RemovableRole,
+         PendingDeletionRole,
++        ConfigurableRole,
+     };
+ 
+     int rowCount(const QModelIndex &parent) const override;
+diff --git a/kcms/icons/main.cpp b/kcms/icons/main.cpp
+index 7d9ef26..b2c3981 100644
+--- a/kcms/icons/main.cpp
++++ b/kcms/icons/main.cpp
+@@ -18,12 +18,15 @@
+ 
+ #include <QDBusConnection>
+ #include <QDBusMessage>
++#include <QDir>
++#include <QFileInfo>
+ #include <QGuiApplication>
+ #include <QPainter>
+ #include <QPixmapCache>
+ #include <QProcess>
+ #include <QQuickItem>
+ #include <QQuickWindow>
++#include <QStandardPaths>
+ #include <QStringList>
+ #include <QSvgRenderer>
+ 
+@@ -34,6 +37,7 @@
+ #include <KLocalizedString>
+ #include <KPluginFactory>
+ #include <KSharedConfig>
++#include <KSharedDataCache>
+ #include <KTar>
+ 
+ #include <KIO/DeleteJob>
+@@ -45,6 +49,7 @@
+ #include "iconsdata.h"
+ #include "iconsmodel.h"
+ #include "iconssettings.h"
++#include "themeconfig.h"
+ 
+ #include "config.h" // for CMAKE_INSTALL_FULL_LIBEXECDIR
+ 
+@@ -72,6 +77,75 @@ IconModule::IconModule(QObject *parent, const KPluginMetaData &data)
+ 
+ IconModule::~IconModule() = default;
+ 
++void IconModule::configureIconTheme(const QString &themeName)
++{
++    const int row = pluginIndex(themeName);
++    if (row < 0 || !m_model->index(row, 0).data(IconsModel::ConfigurableRole).toBool()) {
++        Q_EMIT showErrorMessage(i18n("This icon theme has no supported configuration."));
++        return;
++    }
++    if (m_configurator) {
++        Q_EMIT showErrorMessage(i18n("The icon configuration dialog is already open."));
++        return;
++    }
++    if (iconsSettings()->isImmutable(QStringLiteral("Theme"))) {
++        Q_EMIT showErrorMessage(i18n("The icon theme selection is locked by your administrator."));
++        return;
++    }
++    const auto executable = QStandardPaths::findExecutable(QStringLiteral("plasma-icon-theme-config"), {QStringLiteral(CMAKE_INSTALL_FULL_LIBEXECDIR)});
++    if (executable.isEmpty()) {
++        Q_EMIT showErrorMessage(i18n("The System Settings icon configuration renderer is not installed."));
++        return;
++    }
++    KIconTheme theme(themeName);
++    ThemeConfiguration configuration;
++    QString error;
++    if (!readThemeConfiguration(theme.dir(), configuration, error)) {
++        Q_EMIT showErrorMessage(i18n("Unable to read icon configuration: %1", error));
++        return;
++    }
++    const auto configuredId = configuredThemeId(configuration.source);
++    auto *process = new QProcess(this);
++    m_configurator = process;
++    process->setProgram(executable);
++    process->setArguments({theme.dir()});
++    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
++        if (error == QProcess::FailedToStart) {
++            Q_EMIT showErrorMessage(i18n("Unable to start the icon configurator: %1", process->errorString()));
++            m_configurator = nullptr;
++            process->deleteLater();
++        }
++    });
++    connect(process, &QProcess::finished, this, [this, process, configuredId](int code, QProcess::ExitStatus status) {
++        m_configurator = nullptr;
++        process->deleteLater();
++        if (status != QProcess::NormalExit || (code != 0 && code != 2)) {
++            Q_EMIT showErrorMessage(i18n("The icon configurator failed: %1", QString::fromUtf8(process->readAllStandardError())));
++            return;
++        }
++        if (code == 2) {
++            return;
++        }
++        const auto previousTheme = iconsSettings()->theme();
++        iconsSettings()->setTheme(configuredId);
++        if (!iconsSettings()->save()) {
++            iconsSettings()->setTheme(previousTheme);
++            Q_EMIT showErrorMessage(i18n("The artwork settings were saved, but the icon theme selection could not be saved."));
++            return;
++        }
++        KIconTheme::reconfigure();
++        KSharedDataCache::deleteCache(QStringLiteral("icon-cache"));
++        m_kiconThemeCache.clear();
++        QPixmapCache::clear();
++        m_model->load();
++        for (int group = 0; group < KIconLoader::LastGroup; ++group) {
++            KIconLoader::emitChange(static_cast<KIconLoader::Group>(group));
++        }
++        Q_EMIT showSuccessMessage(i18n("The icon theme settings have been saved and applied."));
++    });
++    process->start();
++}
++
+ IconsSettings *IconModule::iconsSettings() const
+ {
+     return m_data->settings();
+diff --git a/kcms/icons/main.h b/kcms/icons/main.h
+index 913a4ac..9c004d0 100644
+--- a/kcms/icons/main.h
++++ b/kcms/icons/main.h
+@@ -29,6 +29,7 @@ class FileCopyJob;
+ }
+ 
+ class IconsModel;
++class QProcess;
+ 
+ class IconModule : public KQuickManagedConfigModule
+ {
+@@ -66,6 +67,7 @@ public:
+     Q_INVOKABLE void installThemeFromFile(const QUrl &url);
+ 
+     Q_INVOKABLE int pluginIndex(const QString &pluginName) const;
++    Q_INVOKABLE void configureIconTheme(const QString &themeName);
+ 
+     // QML doesn't understand QList<QPixmap>, hence wrapped in a QVariantList
+     Q_INVOKABLE QVariantList previewIcons(const QString &themeName, int size, qreal dpr, int limit = -1);
+@@ -97,4 +99,5 @@ private:
+ 
+     std::unique_ptr<QTemporaryFile> m_tempInstallFile;
+     QPointer<KIO::FileCopyJob> m_tempCopyJob;
++    QPointer<QProcess> m_configurator;
+ };
+diff --git a/kcms/icons/ui/main.qml b/kcms/icons/ui/main.qml
+index a5dc80b..d5b8032 100644
+--- a/kcms/icons/ui/main.qml
++++ b/kcms/icons/ui/main.qml
+@@ -183,6 +183,14 @@ KCM.GridViewKCM {
+         }
+ 
+         actions: [
++            Kirigami.Action {
++                objectName: "configureIconTheme-" + model.themeName
++                icon.name: "document-edit"
++                tooltip: i18nc("@action:button", "Configure Icons…")
++                visible: model.configurable
++                enabled: !model.pendingDeletion
++                onTriggered: kcm.configureIconTheme(model.themeName)
++            },
+             Kirigami.Action {
+                 icon.name: "edit-delete"
+                 tooltip: if (enabled) {
+diff --git a/kcms/icons/themeconfig.h b/kcms/icons/themeconfig.h
+new file mode 100644
+index 0000000..124c8fc
+--- /dev/null
++++ b/kcms/icons/themeconfig.h
+@@ -0,0 +1,32 @@
++// SPDX-FileCopyrightText: 2026 Oxygen contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <QList>
++#include <QMap>
++#include <QStringList>
++
++struct ThemeControl {
++    QString id;
++    QString label;
++    bool defaultValue;
++};
++struct ThemeInstallationRule {
++    QString control;
++    bool equals;
++    QStringList directories;
++};
++struct ThemePage {
++    QString title;
++    QList<ThemeControl> controls;
++};
++struct ThemeConfiguration {
++    QString source;
++    QString title;
++    QString description;
++    QList<ThemePage> pages;
++    QList<ThemeInstallationRule> rules;
++};
++
++bool readThemeConfiguration(const QString &directory, ThemeConfiguration &result, QString &error);
++QString configuredThemeId(const QString &source);
++bool applyThemeConfiguration(const ThemeConfiguration &configuration, const QMap<QString, bool> &values, QString &error);
+diff --git a/kcms/icons/themeconfig.cpp b/kcms/icons/themeconfig.cpp
+new file mode 100644
+index 0000000..dfd3206
+--- /dev/null
++++ b/kcms/icons/themeconfig.cpp
+@@ -0,0 +1,394 @@
++// SPDX-FileCopyrightText: 2026 Oxygen contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "themeconfig.h"
++#include <KConfig>
++#include <KConfigGroup>
++#include <QCryptographicHash>
++#include <QDir>
++#include <QDirIterator>
++#include <QFile>
++#include <QFileInfo>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QLockFile>
++#include <QRegularExpression>
++#include <QSaveFile>
++#include <QSet>
++#include <QStandardPaths>
++#include <QTemporaryDir>
++#include <algorithm>
++
++namespace
++{
++bool fail(QString &error, const QString &message)
++{
++    error = message;
++    return false;
++}
++bool relativePath(const QString &path)
++{
++    return !path.isEmpty() && !QDir::isAbsolutePath(path) && QDir::cleanPath(path) == path && path != QLatin1String(".") && path != QLatin1String("..")
++        && !path.startsWith(QLatin1String("../")) && !path.contains(QLatin1Char('\\')) && !path.contains(QLatin1Char('\n'))
++        && !path.contains(QLatin1Char('\r'));
++}
++bool boundedText(const QJsonValue &value)
++{
++    return value.isString() && !value.toString().isEmpty() && value.toString().size() <= 1024;
++}
++bool keys(const QJsonObject &object, const QStringList &allowed)
++{
++    for (auto i = object.begin(); i != object.end(); ++i) {
++        if (!allowed.contains(i.key())) {
++            return false;
++        }
++    }
++    return true;
++}
++QString outputRoot()
++{
++    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/icons");
++}
++QString ownerPath(const QString &source)
++{
++    return outputRoot() + QLatin1Char('/') + configuredThemeId(source);
++}
++bool writableRoot(QString &error)
++{
++    const auto root = outputRoot();
++    if (!QDir().mkpath(root)) {
++        return fail(error, QStringLiteral("Cannot create the user icon directory."));
++    }
++    if (QFileInfo(root).canonicalFilePath() != QDir::cleanPath(root)) {
++        return fail(error, QStringLiteral("The user icon directory must not be a symlink."));
++    }
++    return true;
++}
++bool copyArtwork(const QString &source, const QString &destination)
++{
++    QFile input(source);
++    QFile output(destination);
++    if (!input.open(QIODevice::ReadOnly) || input.size() > 32 * 1024 * 1024 || !output.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
++        return false;
++    }
++    // Artwork is staged privately; avoid QFile::copy's per-file durable sync.
++    // Metadata and the final directory switch determine publication.
++    qint64 copied = 0;
++    while (!input.atEnd()) {
++        const auto data = input.read(65536);
++        copied += data.size();
++        if (data.isEmpty() || copied > 32 * 1024 * 1024 || output.write(data) != data.size()) {
++            return false;
++        }
++    }
++    return input.error() == QFile::NoError && output.flush()
++        && output.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadGroup | QFile::ReadOther);
++}
++}
++
++QString configuredThemeId(const QString &source)
++{
++    return QFileInfo(source).fileName();
++}
++
++bool readThemeConfiguration(const QString &directory, ThemeConfiguration &result, QString &error)
++{
++    result = {};
++    QString source = QFileInfo(directory).canonicalFilePath();
++    if (source.isEmpty()) {
++        return fail(error, QStringLiteral("The icon theme does not exist."));
++    }
++    const auto identity = configuredThemeId(source);
++    if (!relativePath(identity) || identity.startsWith(QLatin1Char('.'))) {
++        return fail(error, QStringLiteral("Invalid icon theme identity."));
++    }
++    KConfig index(source + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++    const KConfigGroup managed(&index, QStringLiteral("X-KDE-GeneratedIconConfiguration"));
++    if (managed.readEntry("Version", 0) == 1) {
++        const auto original = QFileInfo(managed.readEntry("Source", QString())).canonicalFilePath();
++        const QString legacyId =
++            QStringLiteral("configured-") + QString::fromLatin1(QCryptographicHash::hash(original.toUtf8(), QCryptographicHash::Sha256).toHex().left(16));
++        const QString legacyPath = outputRoot() + QLatin1Char('/') + legacyId;
++        if (original.isEmpty() || original == source
++            || (source != QFileInfo(ownerPath(original)).canonicalFilePath() && source != QFileInfo(legacyPath).canonicalFilePath())
++            || QFileInfo(directory).isSymLink()) {
++            return fail(error, QStringLiteral("Invalid generated theme source."));
++        }
++        source = original;
++    }
++    KConfig sourceIndex(source + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++    if (!QFileInfo(source + QStringLiteral("/index.theme")).canonicalFilePath().startsWith(source + QLatin1Char('/'))) {
++        return fail(error, QStringLiteral("Theme index escapes the source directory."));
++    }
++    if (sourceIndex.isImmutable()) {
++        return fail(error, QStringLiteral("Immutable theme metadata cannot be configured."));
++    }
++    for (const auto &name : sourceIndex.groupList()) {
++        const KConfigGroup group(&sourceIndex, name);
++        if (group.isImmutable()) {
++            return fail(error, QStringLiteral("Immutable theme metadata cannot be configured."));
++        }
++        for (const auto &key : group.keyList()) {
++            if (group.isEntryImmutable(key)) {
++                return fail(error, QStringLiteral("Immutable theme metadata cannot be configured."));
++            }
++        }
++    }
++    if (KConfigGroup(&sourceIndex, QStringLiteral("Icon Theme")).readEntry("X-KDE-IconConfiguration", QString()) != QLatin1String("DeclarativeV1")) {
++        return fail(error, QStringLiteral("This theme does not declare supported configuration."));
++    }
++    const auto root = source + QLatin1Char('/');
++    QFile manifest(root + QStringLiteral("icon-settings.json"));
++    if (!QFileInfo(manifest).canonicalFilePath().startsWith(root) || !manifest.open(QIODevice::ReadOnly) || manifest.size() > 65536) {
++        return fail(error, QStringLiteral("Cannot read the theme configuration declaration."));
++    }
++    QJsonParseError parseError;
++    const auto document = QJsonDocument::fromJson(manifest.readAll(), &parseError);
++    const auto object = document.object();
++    if (parseError.error != QJsonParseError::NoError || !document.isObject()
++        || !keys(object,
++                 {QStringLiteral("version"), QStringLiteral("title"), QStringLiteral("description"), QStringLiteral("pages"), QStringLiteral("installation")})
++        || object.value(QStringLiteral("version")) != QJsonValue(1) || !boundedText(object.value(QStringLiteral("title")))
++        || !boundedText(object.value(QStringLiteral("description"))) || !object.value(QStringLiteral("pages")).isArray()) {
++        return fail(error, QStringLiteral("Invalid theme configuration schema."));
++    }
++    const auto registered = KConfigGroup(&sourceIndex, QStringLiteral("Icon Theme")).readEntry("Directories", QStringList())
++        + KConfigGroup(&sourceIndex, QStringLiteral("Icon Theme")).readEntry("ScaledDirectories", QStringList());
++    for (const auto &path : registered) {
++        if (!relativePath(path)) {
++            return fail(error, QStringLiteral("Invalid registered icon directory."));
++        }
++    }
++    QSet<QString> ids;
++    QSet<QString> controlled;
++    const auto pages = object.value(QStringLiteral("pages")).toArray();
++    if (pages.isEmpty() || pages.size() > 8) {
++        return fail(error, QStringLiteral("Invalid page count."));
++    }
++    for (const auto &value : pages) {
++        const auto page = value.toObject();
++        if (!value.isObject() || !keys(page, {QStringLiteral("title"), QStringLiteral("controls")}) || !boundedText(page.value(QStringLiteral("title")))
++            || !page.value(QStringLiteral("controls")).isArray()) {
++            return fail(error, QStringLiteral("Invalid configuration page."));
++        }
++        ThemePage parsedPage{page.value(QStringLiteral("title")).toString(), {}};
++        const auto controls = page.value(QStringLiteral("controls")).toArray();
++        if (controls.isEmpty() || controls.size() > 64 || ids.size() + controls.size() > 64) {
++            return fail(error, QStringLiteral("Invalid control count."));
++        }
++        for (const auto &entry : controls) {
++            const auto control = entry.toObject();
++            const auto id = control.value(QStringLiteral("id")).toString();
++            static const QRegularExpression identifier(QStringLiteral("^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"));
++            if (!entry.isObject() || !keys(control, {QStringLiteral("id"), QStringLiteral("type"), QStringLiteral("label"), QStringLiteral("default")})
++                || !identifier.match(id).hasMatch() || ids.contains(id) || control.value(QStringLiteral("type")).toString() != QLatin1String("checkbox")
++                || !boundedText(control.value(QStringLiteral("label"))) || !control.value(QStringLiteral("default")).isBool()) {
++                return fail(error, QStringLiteral("Invalid or unsupported configuration control."));
++            }
++            ids.insert(id);
++            parsedPage.controls.append({id, control.value(QStringLiteral("label")).toString(), control.value(QStringLiteral("default")).toBool()});
++        }
++        result.pages.append(parsedPage);
++    }
++    const auto installation = object.value(QStringLiteral("installation")).toObject();
++    if (!object.value(QStringLiteral("installation")).isObject() || !keys(installation, {QStringLiteral("type"), QStringLiteral("rules")})
++        || installation.value(QStringLiteral("type")).toString() != QLatin1String("userThemeCopy") || !installation.value(QStringLiteral("rules")).isArray()) {
++        return fail(error, QStringLiteral("Unsupported installation request."));
++    }
++    const auto rules = installation.value(QStringLiteral("rules")).toArray();
++    if (rules.isEmpty() || rules.size() > 128) {
++        return fail(error, QStringLiteral("Invalid installation rule count."));
++    }
++    QSet<QString> referenced;
++    for (const auto &entry : rules) {
++        const auto rule = entry.toObject();
++        const auto condition = rule.value(QStringLiteral("when")).toObject();
++        const auto id = condition.value(QStringLiteral("control")).toString();
++        if (!entry.isObject() || !keys(rule, {QStringLiteral("when"), QStringLiteral("operation")}) || !rule.value(QStringLiteral("when")).isObject()
++            || !keys(condition, {QStringLiteral("control"), QStringLiteral("equals")}) || !ids.contains(id)
++            || !condition.value(QStringLiteral("equals")).isBool()) {
++            return fail(error, QStringLiteral("Invalid installation condition."));
++        }
++        const auto action = rule.value(QStringLiteral("operation")).toObject();
++        if (!rule.value(QStringLiteral("operation")).isObject() || !keys(action, {QStringLiteral("type"), QStringLiteral("directories")})
++            || action.value(QStringLiteral("type")).toString() != QLatin1String("omitDirectories") || !action.value(QStringLiteral("directories")).isArray()) {
++            return fail(error, QStringLiteral("Unsupported installation operation."));
++        }
++        QStringList directories;
++        const auto paths = action.value(QStringLiteral("directories")).toArray();
++        if (paths.isEmpty() || paths.size() > 256) {
++            return fail(error, QStringLiteral("Invalid action directory count."));
++        }
++        for (const auto &pathValue : paths) {
++            const auto path = pathValue.toString();
++            const QFileInfo file(root + path);
++            if (!pathValue.isString() || !relativePath(path) || !registered.contains(path) || controlled.contains(path) || !file.isDir()
++                || !file.canonicalFilePath().startsWith(root)) {
++                return fail(error, QStringLiteral("Invalid action path: %1").arg(path));
++            }
++            directories.append(path);
++            controlled.insert(path);
++        }
++        referenced.insert(id);
++        result.rules.append({id, condition.value(QStringLiteral("equals")).toBool(), directories});
++    }
++    if (referenced != ids) {
++        return fail(error, QStringLiteral("Every control must have an installation rule."));
++    }
++    // Nested action roots would make checkbox semantics ambiguous.
++    for (const auto &a : controlled) {
++        for (const auto &b : controlled) {
++            if (a != b && a.startsWith(b + QLatin1Char('/'))) {
++                return fail(error, QStringLiteral("Overlapping action directories."));
++            }
++        }
++    }
++    result.source = source;
++    result.title = object.value(QStringLiteral("title")).toString();
++    result.description = object.value(QStringLiteral("description")).toString();
++    return true;
++}
++
++bool applyThemeConfiguration(const ThemeConfiguration &configuration, const QMap<QString, bool> &values, QString &error)
++{
++    // Re-read untrusted data at Apply; never act on a caller-supplied path list.
++    ThemeConfiguration current;
++    if (!readThemeConfiguration(configuration.source, current, error) || !writableRoot(error)) {
++        return false;
++    }
++    QStringList excluded;
++    QSet<QString> expected;
++    for (const auto &page : current.pages) {
++        for (const auto &control : page.controls) {
++            expected.insert(control.id);
++            if (!values.contains(control.id)) {
++                return fail(error, QStringLiteral("Missing configuration value."));
++            }
++        }
++    }
++    if (values.size() != expected.size()) {
++        return fail(error, QStringLiteral("Unexpected configuration value."));
++    }
++    for (const auto &rule : current.rules) {
++        if (values.value(rule.control) == rule.equals) {
++            excluded.append(rule.directories);
++        }
++    }
++    const auto root = outputRoot();
++    const auto target = ownerPath(current.source);
++    const bool localSource = current.source == target;
++    const QString retainedSource = root + QStringLiteral("/.icon-config-sources/") + configuredThemeId(current.source);
++    QLockFile lock(root + QLatin1Char('/') + configuredThemeId(current.source) + QStringLiteral(".lock"));
++    if (!lock.tryLock()) {
++        return fail(error, QStringLiteral("Another configuration operation is running."));
++    }
++    const bool existing = QFileInfo::exists(target) || QFileInfo(target).isSymLink();
++    if (existing && !localSource) {
++        KConfig previous(target + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++        const KConfigGroup marker(&previous, QStringLiteral("X-KDE-GeneratedIconConfiguration"));
++        if (QFileInfo(target).isSymLink() || marker.readEntry("Version", 0) != 1 || marker.readEntry("Source", QString()) != current.source) {
++            return fail(error, QStringLiteral("Refusing to replace an unmanaged user theme."));
++        }
++    }
++    if (localSource) {
++        const auto retainedRoot = QFileInfo(retainedSource).path();
++        if (!QDir().mkpath(retainedRoot) || QFileInfo(retainedRoot).canonicalFilePath() != retainedRoot || QFileInfo::exists(retainedSource)
++            || QFileInfo(retainedSource).isSymLink()) {
++            return fail(error, QStringLiteral("Cannot preserve the original user theme."));
++        }
++    }
++    QTemporaryDir stage(root + QStringLiteral("/.icon-config-XXXXXX"));
++    if (!stage.isValid()) {
++        return fail(error, QStringLiteral("Cannot stage the configured theme."));
++    }
++    const auto sourceRoot = current.source + QLatin1Char('/');
++    const auto omitted = [&excluded](const QString &path) {
++        return std::any_of(excluded.cbegin(), excluded.cend(), [&path](const auto &directory) {
++            return path == directory || path.startsWith(directory + QLatin1Char('/'));
++        });
++    };
++    // Dereference individual files, never directory symlinks; no output symlinks
++    // are created. Escaping source links are rejected, even for icon aliases.
++    QDirIterator iterator(current.source, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden, QDirIterator::Subdirectories);
++    qsizetype total = 0;
++    int files = 0;
++    while (iterator.hasNext()) {
++        const auto path = iterator.next();
++        const auto relative = QDir(current.source).relativeFilePath(path);
++        if (omitted(relative) || relative == QLatin1String("index.theme") || relative == QLatin1String("icon-settings.json")) {
++            continue;
++        }
++        const QFileInfo info(path);
++        const auto canonical = info.canonicalFilePath();
++        if (!relativePath(relative) || !canonical.startsWith(sourceRoot) || (info.isDir() && info.isSymLink())) {
++            return fail(error, QStringLiteral("Refusing unsafe theme path: %1").arg(relative));
++        }
++        const auto destination = stage.path() + QLatin1Char('/') + relative;
++        if (info.isDir()) {
++            if (!QDir().mkpath(destination)) {
++                return fail(error, QStringLiteral("Cannot create an artwork directory."));
++            }
++        } else if (info.isFile()) {
++            if (!QStringList{QStringLiteral("png"), QStringLiteral("svg"), QStringLiteral("svgz"), QStringLiteral("xpm")}.contains(info.suffix().toLower())) {
++                continue;
++            }
++            if (++files > 100000 || info.size() > 32 * 1024 * 1024 || (total += info.size()) > 2LL * 1024 * 1024 * 1024) {
++                return fail(error, QStringLiteral("Theme copy exceeds safety limits."));
++            }
++            if (!QDir().mkpath(QFileInfo(destination).path()) || !copyArtwork(canonical, destination)) {
++                return fail(error, QStringLiteral("Cannot copy artwork: %1").arg(relative));
++            }
++        } else {
++            return fail(error, QStringLiteral("Unsupported theme file: %1").arg(relative));
++        }
++    }
++    if (!QFile::copy(sourceRoot + QStringLiteral("index.theme"), stage.path() + QStringLiteral("/index.theme"))
++        || !QFile::copy(sourceRoot + QStringLiteral("icon-settings.json"), stage.path() + QStringLiteral("/icon-settings.json"))) {
++        return fail(error, QStringLiteral("Cannot copy theme metadata."));
++    }
++    for (const auto &name : {QStringLiteral("index.theme"), QStringLiteral("icon-settings.json")}) {
++        if (!QFile::setPermissions(stage.path() + QLatin1Char('/') + name, QFile::ReadOwner | QFile::WriteOwner | QFile::ReadGroup | QFile::ReadOther)) {
++            return fail(error, QStringLiteral("Cannot set metadata permissions."));
++        }
++    }
++    {
++        KConfig index(stage.path() + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++        KConfigGroup theme(&index, QStringLiteral("Icon Theme"));
++        for (const auto &key : {QStringLiteral("Directories"), QStringLiteral("ScaledDirectories")}) {
++            auto directories = theme.readEntry(key, QStringList());
++            directories.removeIf(omitted);
++            theme.writeEntry(key, directories);
++        }
++        for (const auto &group : index.groupList()) {
++            if (omitted(group)) {
++                index.deleteGroup(group);
++            }
++        }
++        KConfigGroup marker(&index, QStringLiteral("X-KDE-GeneratedIconConfiguration"));
++        marker.writeEntry("Version", 1);
++        marker.writeEntry("Source", localSource ? retainedSource : current.source);
++        KConfigGroup settings(&index, QStringLiteral("X-KDE-IconConfigurationValues"));
++        settings.deleteGroup();
++        for (auto i = values.cbegin(); i != values.cend(); ++i) {
++            settings.writeEntry(i.key(), i.value());
++        }
++        if (!index.sync()) {
++            return fail(error, QStringLiteral("Cannot save theme settings."));
++        }
++    }
++    const QString backup = localSource ? retainedSource : QString(stage.path() + QStringLiteral("-previous"));
++    if (existing && !QDir().rename(target, backup)) {
++        return fail(error, QStringLiteral("Cannot preserve the previous configured theme."));
++    }
++    if (!QDir().rename(stage.path(), target)) {
++        if (existing && !QDir().rename(backup, target)) {
++            return fail(error, QStringLiteral("Activation and rollback failed. Previous theme remains at %1.").arg(backup));
++        }
++        return fail(error, QStringLiteral("Cannot activate the configured theme."));
++    }
++    stage.setAutoRemove(false);
++    if (existing && !localSource && !QDir(backup).removeRecursively()) {
++        return fail(error, QStringLiteral("Theme saved, but previous copy could not be removed: %1").arg(backup));
++    }
++    return true;
++}
+diff --git a/kcms/icons/themeconfigdialog.cpp b/kcms/icons/themeconfigdialog.cpp
+new file mode 100644
+index 0000000..2d31718
+--- /dev/null
++++ b/kcms/icons/themeconfigdialog.cpp
+@@ -0,0 +1,207 @@
++// SPDX-FileCopyrightText: 2026 Oxygen contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "themeconfig.h"
++#include <KConfig>
++#include <KConfigGroup>
++#include <QApplication>
++#include <QCheckBox>
++#include <QDialog>
++#include <QDialogButtonBox>
++#include <QDir>
++#include <QFileInfo>
++#include <QIcon>
++#include <QLabel>
++#include <QMessageBox>
++#include <QPushButton>
++#include <QStandardPaths>
++#include <QStyle>
++#include <QStyleFactory>
++#include <QTabWidget>
++#include <QThread>
++#include <QTimer>
++#include <QVBoxLayout>
++#include <cstdio>
++#include <memory>
++
++class ConfigurationDialog : public QDialog
++{
++public:
++    bool saving = false;
++    void reject() override
++    {
++        if (!saving) {
++            QDialog::reject();
++        }
++    }
++};
++
++int main(int argc, char **argv)
++{
++    QApplication app(argc, argv);
++    app.setApplicationName(QStringLiteral("plasma-icon-theme-config"));
++    const auto arguments = app.arguments();
++    if (arguments.size() < 2) {
++        std::fprintf(stderr, "An installed theme directory is required.\n");
++        return 1;
++    }
++    ThemeConfiguration configuration;
++    QString error;
++    if (!readThemeConfiguration(arguments.at(1), configuration, error)) {
++        std::fprintf(stderr, "%s\n", qPrintable(error));
++        return 1;
++    }
++    const bool defaultsOnly = arguments.contains(QStringLiteral("--apply-defaults"));
++    const bool disableAll = arguments.contains(QStringLiteral("--disable-all"));
++    QMap<QString, bool> values;
++    const auto target =
++        QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/icons/") + configuredThemeId(configuration.source);
++    KConfig saved(target + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++    const KConfigGroup stored(&saved, QStringLiteral("X-KDE-IconConfigurationValues"));
++    for (const auto &page : configuration.pages) {
++        for (const auto &control : page.controls) {
++            values.insert(control.id, disableAll ? false : defaultsOnly ? control.defaultValue : stored.readEntry(control.id, control.defaultValue));
++        }
++    }
++    if (defaultsOnly || disableAll) {
++        if (!applyThemeConfiguration(configuration, values, error)) {
++            std::fprintf(stderr, "%s\n", qPrintable(error));
++            return 1;
++        }
++        return 0;
++    }
++    // Use the session-selected appearance even in a test session with an
++    // incomplete platform integration. No theme supplies style/plugin names.
++    KConfig globals(QStringLiteral("kdeglobals"));
++    const auto styleName = KConfigGroup(&globals, QStringLiteral("KDE")).readEntry("widgetStyle", QString());
++    if (!styleName.isEmpty()) {
++        auto *style = QStyleFactory::create(styleName);
++        if (!style) {
++            std::fprintf(stderr, "Cannot load session style: %s\n", qPrintable(styleName));
++            return 1;
++        }
++        app.setStyle(style);
++    }
++    auto iconTheme = KConfigGroup(&globals, QStringLiteral("Icons")).readEntry("Theme", QString());
++    for (const auto &root : QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation)) {
++        QDir icons(root + QStringLiteral("/icons"));
++        if (QFileInfo::exists(icons.filePath(iconTheme + QStringLiteral("/index.theme")))) {
++            break;
++        }
++        bool found = false;
++        for (const auto &name : icons.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
++            if (name.compare(iconTheme, Qt::CaseInsensitive) == 0) {
++                iconTheme = name;
++                found = true;
++                break;
++            }
++        }
++        if (found) {
++            break;
++        }
++    }
++    if (!iconTheme.isEmpty()) {
++        QIcon::setThemeName(iconTheme);
++    }
++    ConfigurationDialog dialog;
++    dialog.setWindowTitle(configuration.title);
++    dialog.setWindowIcon(QIcon::fromTheme(QStringLiteral("preferences-desktop-icons")));
++    dialog.setMinimumWidth(450);
++    auto *layout = new QVBoxLayout(&dialog);
++    auto *description = new QLabel(configuration.description);
++    description->setTextFormat(Qt::PlainText);
++    description->setWordWrap(true);
++    description->setMaximumWidth(600);
++    layout->addWidget(description);
++    auto *tabs = new QTabWidget;
++    tabs->setObjectName(QStringLiteral("configurationPages"));
++    layout->addWidget(tabs);
++    QMap<QString, QCheckBox *> controls;
++    for (const auto &page : configuration.pages) {
++        auto *widget = new QWidget;
++        auto *pageLayout = new QVBoxLayout(widget);
++        for (const auto &control : page.controls) {
++            auto *box = new QCheckBox(control.label);
++            box->setObjectName(control.id);
++            box->setChecked(values.value(control.id));
++            controls.insert(control.id, box);
++            pageLayout->addWidget(box);
++        }
++        pageLayout->addStretch();
++        tabs->addTab(widget, page.title);
++    }
++    auto *notice = new QLabel(QApplication::translate("ThemeConfig",
++                                                      "Save applies these settings to this icon theme for your user. System files stay unchanged. "
++                                                      "Normal size and inherited-theme fallback still applies."));
++    notice->setWordWrap(true);
++    notice->setMaximumWidth(600);
++    layout->addWidget(notice);
++    auto *sourceNotice = new QLabel(QApplication::translate("ThemeConfig", "Original theme: %1").arg(configuration.source));
++    sourceNotice->setTextFormat(Qt::PlainText);
++    sourceNotice->setWordWrap(true);
++    sourceNotice->setMaximumWidth(600);
++    layout->addWidget(sourceNotice);
++    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel | QDialogButtonBox::RestoreDefaults);
++    buttons->button(QDialogButtonBox::Save)->setIcon(QIcon::fromTheme(QStringLiteral("document-save")));
++    buttons->button(QDialogButtonBox::Cancel)->setIcon(QIcon::fromTheme(QStringLiteral("dialog-cancel")));
++    buttons->button(QDialogButtonBox::RestoreDefaults)->setIcon(QIcon::fromTheme(QStringLiteral("edit-undo")));
++    layout->addWidget(buttons);
++    QObject::connect(buttons->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked, &dialog, [&]() {
++        for (const auto &page : configuration.pages) {
++            for (const auto &control : page.controls) {
++                controls.value(control.id)->setChecked(control.defaultValue);
++            }
++        }
++    });
++    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
++    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
++        if (dialog.saving) {
++            return;
++        }
++        for (auto i = controls.cbegin(); i != controls.cend(); ++i) {
++            values.insert(i.key(), i.value()->isChecked());
++        }
++        struct SaveResult {
++            bool success = false;
++            QString error;
++        };
++        const auto result = std::make_shared<SaveResult>();
++        dialog.saving = true;
++        buttons->setEnabled(false);
++        tabs->setEnabled(false);
++        notice->setText(QApplication::translate("ThemeConfig", "Saving icon theme settings..."));
++        dialog.setCursor(Qt::BusyCursor);
++        auto *worker = QThread::create([configuration, values, result]() {
++            result->success = applyThemeConfiguration(configuration, values, result->error);
++        });
++        QObject::connect(worker, &QThread::finished, &dialog, [&, result, worker]() {
++            worker->deleteLater();
++            dialog.saving = false;
++            dialog.unsetCursor();
++            if (result->success) {
++                dialog.accept();
++            } else {
++                buttons->setEnabled(true);
++                tabs->setEnabled(true);
++                notice->setText(QApplication::translate("ThemeConfig", "Settings were not saved. Correct the error and try again."));
++                QMessageBox::critical(&dialog, dialog.windowTitle(), result->error);
++            }
++        });
++        worker->start();
++    });
++    if (arguments.contains(QStringLiteral("--smoke-test"))) {
++        QTimer::singleShot(1000, &dialog, [&]() {
++            std::fprintf(stderr,
++                         "Widget style: %s; icon theme: %s; pages: %d; controls: %lld\n",
++                         qPrintable(app.style()->objectName()),
++                         qPrintable(QIcon::themeName()),
++                         tabs->count(),
++                         static_cast<long long>(controls.size()));
++            const auto image = qEnvironmentVariable("ICON_CONFIG_SCREENSHOT");
++            if (!image.isEmpty() && !dialog.grab().save(image)) {
++                std::fprintf(stderr, "Cannot save screenshot.\n");
++            }
++            dialog.reject();
++        });
++    }
++    return dialog.exec() == QDialog::Accepted ? 0 : 2;
++}
+diff --git a/kcms/icons/autotests/CMakeLists.txt b/kcms/icons/autotests/CMakeLists.txt
+new file mode 100644
+index 0000000..556a752
+--- /dev/null
++++ b/kcms/icons/autotests/CMakeLists.txt
+@@ -0,0 +1,5 @@
++find_package(Qt6 REQUIRED COMPONENTS Test)
++add_executable(themeconfigtest themeconfigtest.cpp ../themeconfig.cpp)
++target_link_libraries(themeconfigtest PRIVATE Qt6::Test Qt6::Gui KF6::ConfigCore KF6::IconThemes)
++add_test(NAME themeconfigtest COMMAND themeconfigtest)
++set_tests_properties(themeconfigtest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+diff --git a/kcms/icons/autotests/themeconfigtest.cpp b/kcms/icons/autotests/themeconfigtest.cpp
+new file mode 100644
+index 0000000..02af6dc
+--- /dev/null
++++ b/kcms/icons/autotests/themeconfigtest.cpp
+@@ -0,0 +1,379 @@
++// SPDX-FileCopyrightText: 2026 Oxygen contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "../themeconfig.h"
++#include <KConfig>
++#include <KConfigGroup>
++#include <KIconLoader>
++#include <KIconTheme>
++#include <QCryptographicHash>
++#include <QDir>
++#include <QFile>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QScopeGuard>
++#include <QStandardPaths>
++#include <QTemporaryDir>
++#include <QTest>
++
++class ThemeConfigTest : public QObject
++{
++    Q_OBJECT
++    std::unique_ptr<QTemporaryDir> m_source;
++    QString m_output;
++    QJsonObject m_declaration;
++    static QJsonObject fixture()
++    {
++        return QJsonDocument::fromJson(R"({
++            "version":1,"title":"Fixture settings","description":"Plain-text description",
++            "pages":[{"title":"General","controls":[
++                {"id":"symbolic","type":"checkbox","label":"Symbolic artwork","default":true}]}],
++            "installation":{"type":"userThemeCopy","rules":[
++                {"when":{"control":"symbolic","equals":false},
++                 "operation":{"type":"omitDirectories","directories":["applets/32"]}}]}
++        })")
++            .object();
++    }
++    void write(const QString &relative, const QByteArray &bytes)
++    {
++        QFile file(m_source->path() + QLatin1Char('/') + relative);
++        QVERIFY(file.open(QIODevice::WriteOnly));
++        QCOMPARE(file.write(bytes), bytes.size());
++    }
++    void declaration(const QJsonObject &data)
++    {
++        write(QStringLiteral("icon-settings.json"), QJsonDocument(data).toJson());
++    }
++private Q_SLOTS:
++    void init()
++    {
++        QStandardPaths::setTestModeEnabled(true);
++        const QString fixtures = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/icons/.theme-config-fixtures");
++        QVERIFY(QDir().mkpath(fixtures));
++        m_source = std::make_unique<QTemporaryDir>(fixtures + QStringLiteral("/theme-XXXXXX"));
++        QVERIFY(m_source->isValid());
++        QVERIFY(QDir().mkpath(m_source->path() + QStringLiteral("/base/32")));
++        QVERIFY(QDir().mkpath(m_source->path() + QStringLiteral("/applets/32")));
++        write(QStringLiteral("index.theme"),
++              "[Icon Theme]\nName=Fixture\nName[pt]=Teste\nX-KDE-IconConfiguration=DeclarativeV1\nDirectories=base/32,applets/32\n"
++              "[base/32]\nSize=32\nType=Fixed\n[applets/32]\nSize=32\nType=Fixed\n");
++        write(QStringLiteral("base/32/test.svg"),
++              "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\" fill=\"red\"/></svg>");
++        write(QStringLiteral("applets/32/test-symbolic.svg"),
++              "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\" fill=\"blue\"/></svg>");
++        m_declaration = fixture();
++        declaration(m_declaration);
++        m_output = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/icons/") + configuredThemeId(m_source->path());
++    }
++    void cleanup()
++    {
++        KIconTheme::forceThemeForTests(QString());
++        if (QFileInfo(m_output).isSymLink()) {
++            QVERIFY(QFile::remove(m_output));
++        } else if (QFileInfo::exists(m_output)) {
++            QVERIFY(QDir(m_output).removeRecursively());
++        }
++        m_source.reset();
++    }
++    void testRoundTripAndFallback()
++    {
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY2(readThemeConfiguration(m_source->path(), configuration, error), qPrintable(error));
++        QCOMPARE(configuration.pages[0].controls[0].defaultValue, true);
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), true}}, error), qPrintable(error));
++        QVERIFY(QFileInfo::exists(m_output + QStringLiteral("/applets/32/test-symbolic.svg")));
++        QVERIFY(!QFileInfo(m_output + QStringLiteral("/base/32/test.svg")).isSymLink());
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error), qPrintable(error));
++        QVERIFY(!QFileInfo::exists(m_output + QStringLiteral("/applets/32")));
++        ThemeConfiguration reopened;
++        QVERIFY2(readThemeConfiguration(m_output, reopened, error), qPrintable(error));
++        QCOMPARE(reopened.source, configuration.source);
++        KConfig saved(m_output + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++        QCOMPARE(configuredThemeId(configuration.source), QFileInfo(m_source->path()).fileName());
++        QCOMPARE(KConfigGroup(&saved, QStringLiteral("Icon Theme")).readEntry("Name", QString()), QStringLiteral("Fixture"));
++        QFile index(m_output + QStringLiteral("/index.theme"));
++        QVERIFY(index.open(QIODevice::ReadOnly));
++        QVERIFY(index.readAll().contains("Name[pt]=Teste"));
++        QVERIFY(!KConfigGroup(&saved, QStringLiteral("X-KDE-IconConfigurationValues")).readEntry("symbolic", true));
++        QCOMPARE(KConfigGroup(&saved, QStringLiteral("Icon Theme")).readEntry("Directories", QStringList()), QStringList{QStringLiteral("base/32")});
++        KIconTheme::forceThemeForTests(configuredThemeId(configuration.source));
++        KIconLoader loader;
++        for (int size : {16, 22, 24, 32, 48, 64, 128, 256}) {
++            for (qreal dpr : {1., 1.25, 1.5, 2.}) {
++                QCOMPARE(loader.iconPath(QStringLiteral("test-symbolic"), -size, true, dpr), m_output + QStringLiteral("/base/32/test.svg"));
++            }
++        }
++        QVERIFY(QFileInfo::exists(m_source->path() + QStringLiteral("/applets/32/test-symbolic.svg")));
++        QVERIFY(!applyThemeConfiguration(configuration, {}, error));
++        QVERIFY(!applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}, {QStringLiteral("extra"), true}}, error));
++    }
++    void testUserThemeKeepsIdentityAndOriginalArtwork()
++    {
++        QVERIFY(QDir().mkpath(QFileInfo(m_output).path()));
++        QVERIFY(QDir().rename(m_source->path(), m_output));
++        const auto retained = QFileInfo(m_output).path() + QStringLiteral("/.icon-config-sources/") + QFileInfo(m_output).fileName();
++        const auto remove = qScopeGuard([&]() {
++            QDir(retained).removeRecursively();
++        });
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY2(readThemeConfiguration(m_output, configuration, error), qPrintable(error));
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error), qPrintable(error));
++        QVERIFY(!QFileInfo::exists(m_output + QStringLiteral("/applets/32")));
++        QVERIFY(QFileInfo::exists(retained + QStringLiteral("/applets/32/test-symbolic.svg")));
++        ThemeConfiguration reopened;
++        QVERIFY2(readThemeConfiguration(m_output, reopened, error), qPrintable(error));
++        QCOMPARE(reopened.source, retained);
++        QCOMPARE(configuredThemeId(reopened.source), QFileInfo(m_output).fileName());
++        QVERIFY2(applyThemeConfiguration(reopened, {{QStringLiteral("symbolic"), true}}, error), qPrintable(error));
++        QVERIFY(QFileInfo::exists(m_output + QStringLiteral("/applets/32/test-symbolic.svg")));
++        QVERIFY(QFileInfo::exists(retained + QStringLiteral("/applets/32/test-symbolic.svg")));
++    }
++    void testLegacyConfiguredThemeCanBeReopened()
++    {
++        const auto legacyId = QStringLiteral("configured-")
++            + QString::fromLatin1(QCryptographicHash::hash(m_source->path().toUtf8(), QCryptographicHash::Sha256).toHex().left(16));
++        const auto legacy = QFileInfo(m_output).path() + QLatin1Char('/') + legacyId;
++        QVERIFY(QDir().mkpath(legacy));
++        const auto remove = qScopeGuard([&]() {
++            QDir(legacy).removeRecursively();
++        });
++        KConfig index(legacy + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++        KConfigGroup marker(&index, QStringLiteral("X-KDE-GeneratedIconConfiguration"));
++        marker.writeEntry("Version", 1);
++        marker.writeEntry("Source", m_source->path());
++        QVERIFY(index.sync());
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY2(readThemeConfiguration(legacy, configuration, error), qPrintable(error));
++        QCOMPARE(configuration.source, m_source->path());
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error), qPrintable(error));
++        QVERIFY(QFileInfo::exists(m_output + QStringLiteral("/index.theme")));
++        QCOMPARE(configuredThemeId(configuration.source), QFileInfo(m_output).fileName());
++    }
++    void testInvalidDeclarations_data()
++    {
++        QTest::addColumn<QByteArray>("json");
++        for (const auto &path : {"../escape", "/tmp", "applets/../applets/32", "unregistered"}) {
++            QByteArray data = QJsonDocument(fixture()).toJson();
++            data.replace("applets/32", path);
++            QTest::newRow(path) << data;
++        }
++        auto data = QJsonDocument(fixture()).toJson();
++        auto unsupported = data;
++        unsupported.replace("\"version\": 1", "\"version\": 99");
++        QTest::newRow("version") << unsupported;
++        auto command = data;
++        command.replace("omitDirectories", "execute");
++        QTest::newRow("execute") << command;
++        auto script = fixture();
++        script.insert(QStringLiteral("command"), QStringLiteral("touch /tmp/no"));
++        QTest::newRow("unknown-field") << QJsonDocument(script).toJson();
++        auto badDefault = data;
++        badDefault.replace("\"default\": true", "\"default\": \"yes\"");
++        QTest::newRow("non-boolean-default") << badDefault;
++        auto unknownControl = data;
++        unknownControl.replace("\"control\": \"symbolic\"", "\"control\": \"missing\"");
++        QTest::newRow("unknown-control") << unknownControl;
++        auto badCondition = data;
++        badCondition.replace("\"equals\": false", "\"equals\": \"false\"");
++        QTest::newRow("non-boolean-condition") << badCondition;
++        auto destination = data;
++        destination.replace("\"type\": \"userThemeCopy\"", "\"type\": \"systemTheme\"");
++        QTest::newRow("system-write-request") << destination;
++    }
++    void testInvalidDeclarations()
++    {
++        QFETCH(QByteArray, json);
++        write(QStringLiteral("icon-settings.json"), json);
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY(!readThemeConfiguration(m_source->path(), configuration, error));
++        QVERIFY(!error.isEmpty());
++        QVERIFY(!QFileInfo::exists(m_output));
++    }
++    void testEscapingAssetAndDestination()
++    {
++        QTemporaryDir outside;
++        QFile external(outside.path() + QStringLiteral("/external.svg"));
++        QVERIFY(external.open(QIODevice::WriteOnly));
++        external.write("<svg/>");
++        external.close();
++        QVERIFY(QFile::link(external.fileName(), m_source->path() + QStringLiteral("/base/32/escape.svg")));
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY(readThemeConfiguration(m_source->path(), configuration, error));
++        QVERIFY(!applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error));
++        QVERIFY(!QFileInfo::exists(m_output));
++        QVERIFY(QFile::remove(m_source->path() + QStringLiteral("/base/32/escape.svg")));
++        QVERIFY(QDir().mkpath(QFileInfo(m_output).path()));
++        QVERIFY(QFile::link(outside.path(), m_output));
++        QVERIFY(!applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error));
++        QVERIFY(QFileInfo::exists(external.fileName()));
++    }
++    void testInternalAliasAndNonExecutableCopy()
++    {
++        const QByteArray largeArtwork(160000, 'x');
++        write(QStringLiteral("base/32/large.svg"), largeArtwork);
++        QVERIFY(QFile::link(m_source->path() + QStringLiteral("/base/32/test.svg"), m_source->path() + QStringLiteral("/base/32/alias.svg")));
++        write(QStringLiteral("run.sh"), "#!/bin/sh\nexit 1\n");
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY(readThemeConfiguration(m_source->path(), configuration, error));
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), true}}, error), qPrintable(error));
++        QVERIFY(QFileInfo::exists(m_output + QStringLiteral("/base/32/alias.svg")));
++        QVERIFY(!QFileInfo(m_output + QStringLiteral("/base/32/alias.svg")).isSymLink());
++        QVERIFY(!QFileInfo::exists(m_output + QStringLiteral("/run.sh")));
++        QVERIFY(!(QFile::permissions(m_output + QStringLiteral("/base/32/alias.svg")) & QFile::ExeOwner));
++        QFile copied(m_output + QStringLiteral("/base/32/large.svg"));
++        QVERIFY(copied.open(QIODevice::ReadOnly));
++        QCOMPARE(copied.readAll(), largeArtwork);
++        QFile alias(m_output + QStringLiteral("/base/32/alias.svg"));
++        QFile original(m_source->path() + QStringLiteral("/base/32/test.svg"));
++        QVERIFY(alias.open(QIODevice::ReadOnly));
++        QVERIFY(original.open(QIODevice::ReadOnly));
++        QCOMPARE(alias.readAll(), original.readAll());
++    }
++    void testUnmanagedTheme()
++    {
++        QVERIFY(QDir().mkpath(m_output));
++        QFile file(m_output + QStringLiteral("/index.theme"));
++        QVERIFY(file.open(QIODevice::WriteOnly));
++        file.write("[Icon Theme]\nName=Do not replace\n");
++        file.close();
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY(readThemeConfiguration(m_source->path(), configuration, error));
++        QVERIFY(!applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error));
++        QVERIFY(file.open(QIODevice::ReadOnly));
++        QVERIFY(file.readAll().contains("Do not replace"));
++    }
++
++    void testDeclarationChangesWithoutCompilation()
++    {
++        auto document = fixture();
++        auto pages = document.value(QStringLiteral("pages")).toArray();
++        auto page = pages[0].toObject();
++        auto controls = page.value(QStringLiteral("controls")).toArray();
++        auto control = controls[0].toObject();
++        control.insert(QStringLiteral("default"), false);
++        control.insert(QStringLiteral("label"), QStringLiteral("Changed without compilation"));
++        controls[0] = control;
++        page.insert(QStringLiteral("controls"), controls);
++        pages[0] = page;
++        document.insert(QStringLiteral("pages"), pages);
++        declaration(document);
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY(readThemeConfiguration(m_source->path(), configuration, error));
++        QCOMPARE(configuration.pages[0].controls[0].defaultValue, false);
++        QCOMPARE(configuration.pages[0].controls[0].label, QStringLiteral("Changed without compilation"));
++        // A declaration changed after opening must be validated again at Save.
++        document.insert(QStringLiteral("command"), QStringLiteral("forbidden"));
++        declaration(document);
++        QVERIFY(!applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), true}}, error));
++        QVERIFY(!QFileInfo::exists(m_output));
++    }
++
++    void testThemeDefinesInstallationCondition()
++    {
++        auto document = fixture();
++        auto installation = document.value(QStringLiteral("installation")).toObject();
++        auto rules = installation.value(QStringLiteral("rules")).toArray();
++        auto rule = rules[0].toObject();
++        auto when = rule.value(QStringLiteral("when")).toObject();
++        when.insert(QStringLiteral("equals"), true);
++        rule.insert(QStringLiteral("when"), when);
++        rules[0] = rule;
++        installation.insert(QStringLiteral("rules"), rules);
++        document.insert(QStringLiteral("installation"), installation);
++        declaration(document);
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY(readThemeConfiguration(m_source->path(), configuration, error));
++        // Theme rules, rather than checkbox semantics, determine omission.
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), true}}, error), qPrintable(error));
++        QVERIFY(!QFileInfo::exists(m_output + QStringLiteral("/applets/32")));
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error), qPrintable(error));
++        QVERIFY(QFileInfo::exists(m_output + QStringLiteral("/applets/32/test-symbolic.svg")));
++    }
++
++    void testReadOnlySystemTheme()
++    {
++        const QStringList paths{m_source->path() + QStringLiteral("/base/32/test.svg"),
++                                m_source->path() + QStringLiteral("/applets/32/test-symbolic.svg"),
++                                m_source->path() + QStringLiteral("/index.theme"),
++                                m_source->path() + QStringLiteral("/icon-settings.json")};
++        QMap<QString, QByteArray> originals;
++        for (const auto &path : paths) {
++            QFile file(path);
++            QVERIFY(file.open(QIODevice::ReadOnly));
++            originals.insert(path, file.readAll());
++            QVERIFY(QFile::setPermissions(path, QFile::ReadOwner | QFile::ReadGroup | QFile::ReadOther));
++        }
++        QStringList directories{m_source->path(),
++                                m_source->path() + QStringLiteral("/base"),
++                                m_source->path() + QStringLiteral("/base/32"),
++                                m_source->path() + QStringLiteral("/applets"),
++                                m_source->path() + QStringLiteral("/applets/32")};
++        const auto restore = qScopeGuard([&]() {
++            for (const auto &path : directories) {
++                QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
++            }
++        });
++        for (const auto &path : directories) {
++            QVERIFY(QFile::setPermissions(path, QFile::ReadOwner | QFile::ExeOwner | QFile::ReadGroup | QFile::ExeGroup | QFile::ReadOther | QFile::ExeOther));
++        }
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY(readThemeConfiguration(m_source->path(), configuration, error));
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error), qPrintable(error));
++        QVERIFY(QFileInfo(m_output).isWritable());
++        QVERIFY(QFileInfo(m_output + QStringLiteral("/index.theme")).isWritable());
++        for (auto i = originals.cbegin(); i != originals.cend(); ++i) {
++            QFile file(i.key());
++            QVERIFY(file.open(QIODevice::ReadOnly));
++            QCOMPARE(file.readAll(), i.value());
++            QVERIFY(!QFileInfo(i.key()).isWritable());
++        }
++    }
++
++    void testActualOxygen()
++    {
++        const auto source = qEnvironmentVariable("OXYGEN_TEST_SOURCE");
++        if (source.isEmpty()) {
++            QSKIP("Set OXYGEN_TEST_SOURCE to validate installed Oxygen.");
++        }
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY2(readThemeConfiguration(source, configuration, error), qPrintable(error));
++        const auto output =
++            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/icons/") + configuredThemeId(configuration.source);
++        QVERIFY(!QFileInfo::exists(output));
++        const auto remove = qScopeGuard([&]() {
++            QDir(output).removeRecursively();
++        });
++        QMap<QString, bool> values;
++        for (const auto &page : configuration.pages) {
++            for (const auto &control : page.controls) {
++                values.insert(control.id, false);
++            }
++        }
++        QVERIFY2(applyThemeConfiguration(configuration, values, error), qPrintable(error));
++        KIconTheme::forceThemeForTests(configuredThemeId(configuration.source));
++        KIconLoader loader;
++        for (int size : {16, 22, 24, 32, 48, 64, 128, 256}) {
++            for (qreal dpr : {1., 1.25, 1.5, 2.}) {
++                const auto path = loader.iconPath(QStringLiteral("network-wireless-100-symbolic"), -size, true, dpr);
++                QVERIFY2(path.startsWith(output + QStringLiteral("/base/")), qPrintable(path));
++                QVERIFY(!loader.loadScaledIcon(QStringLiteral("network-wireless-100-symbolic"), KIconLoader::NoGroup, dpr, QSize(size, size)).isNull());
++            }
++        }
++        ThemeConfiguration reopened;
++        QVERIFY2(readThemeConfiguration(output, reopened, error), qPrintable(error));
++        QCOMPARE(reopened.pages.size(), configuration.pages.size());
++    }
++};
++QTEST_MAIN(ThemeConfigTest)
++#include "themeconfigtest.moc"

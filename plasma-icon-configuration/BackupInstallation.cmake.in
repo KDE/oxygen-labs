@@ -1,0 +1,48 @@
+set(prefix "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+set(destinations
+    "${prefix}/@ICON_CONFIGURATION_PLUGIN_DESTINATION@/kcm_icons.so"
+    "${prefix}/@KDE_INSTALL_LIBEXECDIR@/plasma-icon-theme-config")
+set(replacements
+    "@CMAKE_CURRENT_BINARY_DIR@/bin/plasma/kcms/systemsettings/kcm_icons.so"
+    "@CMAKE_CURRENT_BINARY_DIR@/bin/plasma-icon-theme-config")
+
+# Absolute distribution paths must not be prefixed a second time.
+if(IS_ABSOLUTE "@ICON_CONFIGURATION_PLUGIN_DESTINATION@")
+    list(REMOVE_AT destinations 0)
+    list(PREPEND destinations "$ENV{DESTDIR}@ICON_CONFIGURATION_PLUGIN_DESTINATION@/kcm_icons.so")
+endif()
+if(IS_ABSOLUTE "@KDE_INSTALL_LIBEXECDIR@")
+    list(REMOVE_AT destinations 1)
+    list(APPEND destinations "$ENV{DESTDIR}@KDE_INSTALL_LIBEXECDIR@/plasma-icon-theme-config")
+endif()
+
+string(TIMESTAMP timestamp "%Y%m%dT%H%M%S" UTC)
+string(RANDOM LENGTH 8 ALPHABET 0123456789abcdef suffix)
+set(backup "${prefix}/share/plasma-icon-configuration/backups/${timestamp}-${suffix}")
+foreach(destination IN LISTS destinations)
+    if(IS_SYMLINK "${destination}" OR IS_DIRECTORY "${destination}")
+        message(FATAL_ERROR "Refusing to replace a symlink or directory: ${destination}")
+    endif()
+endforeach()
+foreach(replacement IN LISTS replacements)
+    if(NOT EXISTS "${replacement}")
+        message(FATAL_ERROR "Build icon-settings before installing: ${replacement} is missing")
+    endif()
+endforeach()
+file(MAKE_DIRECTORY "${backup}")
+file(WRITE "${backup}/manifest.cmake" "")
+foreach(i RANGE 0 1)
+    list(GET destinations ${i} destination)
+    list(GET replacements ${i} replacement)
+    file(SHA256 "${replacement}" replacement_hash)
+    file(APPEND "${backup}/manifest.cmake"
+        "set(destination_${i} [==[${destination}]==])\nset(installed_hash_${i} ${replacement_hash})\n")
+    if(EXISTS "${destination}")
+        file(COPY_FILE "${destination}" "${backup}/original-${i}")
+        file(SHA256 "${backup}/original-${i}" original_hash)
+        file(APPEND "${backup}/manifest.cmake" "set(original_hash_${i} ${original_hash})\n")
+    endif()
+endforeach()
+file(COPY "@CMAKE_CURRENT_SOURCE_DIR@/RestoreInstallation.cmake" DESTINATION "${backup}")
+message(STATUS "Original files backed up in ${backup}")
+message(STATUS "Restore with: cmake -DBACKUP_DIR=${backup} -P ${backup}/RestoreInstallation.cmake")
