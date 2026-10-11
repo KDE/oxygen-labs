@@ -63,7 +63,7 @@ plasma_add_applet(org.kde.oxygenlabs.weather
         forecastdata.cpp
         locationsdata.cpp
         types.h
-    RESOURCES main.xml
+    RESOURCES main.xml wind-arrows.svgz
     GENERATE_APPLET_CLASS
     QML_ARGS NO_LINT # Upstream workaround for QTBUG-145572.
 )

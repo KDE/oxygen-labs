@@ -28,8 +28,9 @@ code.
 
 The plugin ID is `org.kde.oxygenlabs.weather`, with a separate QML module and
 configuration identity. It can coexist with `org.kde.plasma.weather`.
-The applet uses installed Plasma Weather libraries, providers, wind-arrow
-artwork and upstream translation catalogs, rather than installing replacements.
+The applet uses installed Plasma Weather libraries, providers and upstream
+translation catalogs, rather than installing replacements. Its custom wind
+arrows are embedded in the applet, without changing desktop-theme artwork.
 Keep KDE's Weather Report components installed.
 
 ## Building

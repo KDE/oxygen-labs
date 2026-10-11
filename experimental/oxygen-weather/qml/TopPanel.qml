@@ -158,7 +158,7 @@ GridLayout {
                 Layout.alignment: Qt.AlignHCenter
                 implicitWidth: Kirigami.Units.iconSizes.medium
                 implicitHeight: Kirigami.Units.iconSizes.medium
-                imagePath: "weather/wind-arrows"
+                imagePath: ":/qt/qml/plasma/applet/org/kde/oxygenlabs/weather/wind-arrows.svgz"
                 elementId: visible ? root.lastObservation.windDirection : ""
                 visible: !!root.lastObservation?.windDirection
             }
