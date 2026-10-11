@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.29)
-project(DeclarativeIconConfiguration VERSION 0.1 LANGUAGES NONE)
+project(PlasmaIconConfiguration VERSION 0.1 LANGUAGES NONE)
 
 option(INSTALL_PATCHED_ICON_SETTINGS "Build and install experimental Plasma Icons settings" OFF)
 if(NOT INSTALL_PATCHED_ICON_SETTINGS)
@@ -48,7 +48,10 @@ endif()
 
 set(ICON_CONFIGURATION_PLUGIN_DESTINATION
     "${KDE_INSTALL_QTPLUGINDIR}/plasma/kcms/systemsettings")
-configure_file(BackupInstallation.cmake.in BackupInstallation.cmake @ONLY)
+configure_file(BackupInstallation.cmake.in BackupInstallation.configured.cmake @ONLY)
+file(GENERATE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/BackupInstallation.cmake"
+    INPUT "${CMAKE_CURRENT_BINARY_DIR}/BackupInstallation.configured.cmake")
 install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/BackupInstallation.cmake"
     COMPONENT IconConfiguration)
 install(TARGETS kcm_icons

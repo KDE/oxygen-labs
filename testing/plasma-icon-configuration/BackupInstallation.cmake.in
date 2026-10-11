@@ -3,8 +3,8 @@ set(destinations
     "${prefix}/@ICON_CONFIGURATION_PLUGIN_DESTINATION@/kcm_icons.so"
     "${prefix}/@KDE_INSTALL_LIBEXECDIR@/plasma-icon-theme-config")
 set(replacements
-    "@CMAKE_CURRENT_BINARY_DIR@/bin/plasma/kcms/systemsettings/kcm_icons.so"
-    "@CMAKE_CURRENT_BINARY_DIR@/bin/plasma-icon-theme-config")
+    "$<TARGET_FILE:kcm_icons>"
+    "$<TARGET_FILE:plasma-icon-theme-config>")
 
 # Absolute distribution paths must not be prefixed a second time.
 if(IS_ABSOLUTE "@ICON_CONFIGURATION_PLUGIN_DESTINATION@")

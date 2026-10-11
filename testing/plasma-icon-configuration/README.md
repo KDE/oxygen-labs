@@ -1,4 +1,9 @@
-# Declarative icon configuration for Plasma
+# Oxygen-Labs: declarative icon configuration for Plasma
+
+This is the first component of [Oxygen-Labs](../../README.md), the parent project
+for experimental Oxygen-related work intended for KDE Playground consideration.
+It is in the **testing** tier: the implementation works, but is still undergoing
+validation and feedback. This does not imply upstream Plasma acceptance.
 
 This prototype adds a configuration pencil to System Settings > Icons for
 themes declaring `X-KDE-IconConfiguration=DeclarativeV1` and providing a valid
@@ -11,13 +16,14 @@ regression tests, based on KDE Plasma Workspace tag `v6.7.4`, commit
 
 ## Building
 
-An opt-in CMake project in this directory downloads the pinned Plasma source,
+The Oxygen-Labs root project, or this component configured on its own,
+downloads the pinned Plasma source,
 applies the patch and builds only the Icons settings module, shared renderer
 and relevant tests. By default it does nothing; no source is downloaded and
 nothing is installed until explicitly enabled.
 
 ```bash
-cmake -S /path/to/oxygen2/plasma-icon-configuration -B build -G Ninja \
+cmake -S /path/to/Oxygen-Labs -B build -G Ninja \
     -DINSTALL_PATCHED_ICON_SETTINGS=ON -DBUILD_TESTING=ON \
     -DCMAKE_INSTALL_PREFIX=/path/to/test-prefix
 cmake --build build
@@ -37,7 +43,7 @@ A custom prefix is not automatically loaded by normal System Settings.
 For example, on Arch/Manjaro with matching Plasma and Frameworks versions:
 
 ```bash
-cmake -S /path/to/oxygen2/plasma-icon-configuration -B build-native -G Ninja \
+cmake -S /path/to/Oxygen-Labs -B build-native -G Ninja \
     -DINSTALL_PATCHED_ICON_SETTINGS=ON -DCMAKE_INSTALL_PREFIX=/usr \
     -DKDE_INSTALL_LIBDIR=lib -DKDE_INSTALL_LIBEXECDIR=lib \
     -DKDE_INSTALL_QTPLUGINDIR=lib/qt6/plugins
