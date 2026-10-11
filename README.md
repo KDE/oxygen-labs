@@ -29,11 +29,15 @@ new problems turn up. These are Oxygen-Labs development stages, not KDE
 approval or release status. Moving a component between tiers does not enable
 it automatically; installation remains an explicit choice.
 
-## Current component
+## Current components
+
+[oxygen-weather](experimental/oxygen-weather/) is in **experimental/**:
+a separate weather applet based on KDE Weather Report and its original
+authors' work, with an experimental Oxygen-oriented layout. Enable it explicitly
+with `-DBUILD_OXYGEN_WEATHER=ON`; it does not replace the upstream applet.
 
 [plasma-icon-configuration](testing/plasma-icon-configuration/) is in
-**testing/** and is currently the only
-component: Plasma Workspace **v6.7.4** KCM integration, opt-in CMake
+**testing/**: Plasma Workspace **v6.7.4** KCM integration, opt-in CMake
 build/installer and rollback instructions. The implementation currently lives
 in a patch against the pinned Workspace source, not a standalone replacement
 KCM. Oxygen artwork and theme metadata remain in the separate

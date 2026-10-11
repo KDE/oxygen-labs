@@ -1,6 +1,6 @@
 # Oxygen-Labs: declarative icon configuration for Plasma
 
-This is the first component of [Oxygen-Labs](../../README.md), the parent project
+This is a component of [Oxygen-Labs](../../README.md), the parent project
 for experimental Oxygen-related work.
 It is in the **testing** tier: the implementation works, but is still undergoing
 validation and feedback. This does not imply upstream Plasma acceptance.
