@@ -73,11 +73,3 @@ This is a prototype, not an upstream-approved Plasma feature or a prebuilt
 distribution package. Installation paths and binary compatibility must match
 your distribution. The opt-in installer backs up replaced Plasma components
 and provides a checksum-checked rollback command.
-
-## KDE Playground preparation
-
-Oxygen-Labs is intended as the parent project for a proposed KDE Playground
-repository. This local organization does not create a KDE project, move the
-repository on Invent, or imply KDE acceptance. Those hosting and review steps
-remain separate. The existing Plasma component names, theme metadata contract
-and backup location remain unchanged by the umbrella name.
