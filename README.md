@@ -1,10 +1,9 @@
 # Oxygen-Labs
 
 Oxygen-Labs is an umbrella project for experimental Oxygen-related desktop
-work. Its first component is declarative icon-theme configuration for KDE
-Plasma System Settings: themes describe their UI and restricted installation
-rules in JSON, while Plasma provides the shared parser, Qt Widgets dialog and
-user-local installation engine.
+work. 
+A place were serious experimentation on all things UI will occur, nothing is to silly 
+to not be seriously experimented. in here...  
 
 ## Maturity tiers
 
