@@ -78,3 +78,10 @@ This is a prototype, not an upstream-approved Plasma feature or a prebuilt
 distribution package. Installation paths and binary compatibility must match
 your distribution. The opt-in installer backs up replaced Plasma components
 and provides a checksum-checked rollback command.
+## Licensing
+
+Oxygen-Labs uses the GNU General Public License, version 2 or later
+([COPYING](COPYING)), except where individual files specify another license.
+Existing upstream copyright and license notices remain authoritative.
+SPDX license texts are provided in [LICENSES/](LICENSES/), including the
+LGPL-2.0-or-later and BSD-3-Clause licenses used by some weather applet files.
