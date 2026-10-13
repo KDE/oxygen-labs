@@ -1,5 +1,7 @@
 # Oxygen-Labs
 
+![Oxygen Labs logo](oxygen-labs.png)
+
 Oxygen-Labs is an umbrella project for experimental Oxygen-related desktop
 work. 
 A place were serious experimentation on all things UI will occur, nothing is to silly 
