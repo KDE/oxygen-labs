@@ -1,0 +1,160 @@
+diff --git a/liboxygen/oxygenhelper.cpp b/liboxygen/oxygenhelper.cpp
+index 812b9625..66805e28 100644
+--- a/liboxygen/oxygenhelper.cpp
++++ b/liboxygen/oxygenhelper.cpp
+@@ -15,7 +15,9 @@
+ #include <KWindowSystem>
+ 
+ #include <QApplication>
++#include <QImage>
+ #include <QPainter>
++#include <QRgba64>
+ #include <QTextStream>
+ #include <math.h>
+ 
+@@ -27,6 +29,59 @@
+ #endif
+ #endif
+ 
++namespace
++{
++/*
++ * Oxygen's window background gradients span only a few 8-bit levels over hundreds of pixels,
++ * so plain rounding produces wide visible bands. This makes the banding go away.
++ */
++inline qreal ditherThreshold(int x, int y)
++{
++    static constexpr int bayer[8][8] = {{0, 32, 8, 40, 2, 34, 10, 42},
++                                        {48, 16, 56, 24, 50, 18, 58, 26},
++                                        {12, 44, 4, 36, 14, 46, 6, 38},
++                                        {60, 28, 52, 20, 62, 30, 54, 22},
++                                        {3, 35, 11, 43, 1, 33, 9, 41},
++                                        {51, 19, 59, 27, 49, 17, 57, 25},
++                                        {15, 47, 7, 39, 13, 45, 5, 37},
++                                        {63, 31, 55, 23, 61, 29, 53, 21}};
++    return (bayer[y & 7][x & 7] + 0.5) / 64.0 - 0.5;
++}
++
++//* quantize premultiplied channels given in 8-bit units (0-255, fractional) to a dithered pixel
++inline QRgb ditheredPixel(qreal red, qreal green, qreal blue, qreal alpha, int x, int y)
++{
++    const qreal threshold(ditherThreshold(x, y));
++    const auto quantize = [threshold](qreal value) {
++        return qBound(0, qRound(value + threshold), 255);
++    };
++
++    // keep the premultiplied invariant: no color channel above alpha
++    const int a(quantize(alpha));
++    return qRgba(qMin(quantize(red), a), qMin(quantize(green), a), qMin(quantize(blue), a), a);
++}
++
++//* dither a 16-bit-per-channel premultiplied image down to ARGB32 premultiplied
++QImage ditherToArgb32(const QImage &source)
++{
++    Q_ASSERT(source.format() == QImage::Format_RGBA64_Premultiplied);
++
++    QImage image(source.size(), QImage::Format_ARGB32_Premultiplied);
++    image.setDevicePixelRatio(source.devicePixelRatio());
++
++    constexpr qreal scale(1.0 / 257.0);
++    for (int y = 0; y < source.height(); ++y) {
++        const auto in = reinterpret_cast<const QRgba64 *>(source.constScanLine(y));
++        auto out = reinterpret_cast<QRgb *>(image.scanLine(y));
++        for (int x = 0; x < source.width(); ++x) {
++            out[x] = ditheredPixel(in[x].red() * scale, in[x].green() * scale, in[x].blue() * scale, in[x].alpha() * scale, x, y);
++        }
++    }
++
++    return image;
++}
++}
++
+ namespace Oxygen
+ {
+ const qreal Helper::_slabThickness = 0.45;
+@@ -368,18 +423,43 @@ QPixmap Helper::verticalGradient(const QColor &color, int height, int offset, qr
+         return *cachedPixmap;
+     }
+ 
+-    QPixmap pixmap(highDpiPixmap(1, height, dpr));
+-    pixmap.fill(Qt::transparent);
+-
+-    QLinearGradient gradient(0, offset, 0, height);
+-    gradient.setColorAt(0.0, backgroundTopColor(color));
+-    gradient.setColorAt(0.5, color);
+-    gradient.setColorAt(1.0, backgroundBottomColor(color));
+-
+-    QPainter painter(&pixmap);
+-    painter.fillRect(pixmap.rect(), gradient);
++    // computed directly rather than painted, so it can be dithered (see ditheredPixel);
++    // equivalent to QLinearGradient(0, offset, 0, height) with stops at 0, 0.5 and 1.
++    // The tile is 8 device pixels wide so it can hold the 2D dither pattern
++    const qreal dpiRatio(dpr > 0 ? dpr : qApp->devicePixelRatio());
++    QImage image(8, qRound(height * dpiRatio), QImage::Format_ARGB32_Premultiplied);
++    image.setDevicePixelRatio(dpiRatio);
++
++    // stops are rounded to 8 bits first: the gradient must end on exactly the color that
++    // the flat area below it is filled with, otherwise the dithered end of the gradient
++    // averages to the unrounded color and a faint step shows where the dithering stops
++    const QColor stops[3] = {QColor::fromRgba(backgroundTopColor(color).rgba()),
++                             QColor::fromRgba(color.rgba()),
++                             QColor::fromRgba(backgroundBottomColor(color).rgba())};
++    const qreal span(qMax<qreal>(1, height - offset));
++
++    for (int y = 0; y < image.height(); ++y) {
++        // gradient position at the device pixel center, in logical coordinates, padded at both ends
++        const qreal t(qBound<qreal>(0, ((y + 0.5) / dpiRatio - offset) / span, 1));
++        const QColor &from(stops[t < 0.5 ? 0 : 1]);
++        const QColor &to(stops[t < 0.5 ? 1 : 2]);
++        const qreal f(t < 0.5 ? 2 * t : 2 * t - 1);
++
++        const qreal alpha(255 * (from.alphaF() + (to.alphaF() - from.alphaF()) * f));
++        const auto channel = [f, alpha](float a, float b) {
++            return alpha * (a + (b - a) * f);
++        };
++        const qreal red(channel(from.redF(), to.redF()));
++        const qreal green(channel(from.greenF(), to.greenF()));
++        const qreal blue(channel(from.blueF(), to.blueF()));
++
++        auto line = reinterpret_cast<QRgb *>(image.scanLine(y));
++        for (int x = 0; x < image.width(); ++x) {
++            line[x] = ditheredPixel(red, green, blue, alpha, x, y);
++        }
++    }
+ 
+-    painter.end();
++    const QPixmap pixmap(QPixmap::fromImage(image));
+ 
+     _backgroundCache.insert(key, new QPixmap(pixmap));
+     return pixmap;
+@@ -395,8 +475,11 @@ QPixmap Helper::radialGradient(const QColor &color, int width, int height, qreal
+         return *cachedPixmap;
+     }
+ 
+-    QPixmap pixmap(highDpiPixmap(width, height, dpr));
+-    pixmap.fill(Qt::transparent);
++    // painted at 16 bits per channel, then dithered down (see ditheredPixel)
++    const qreal dpiRatio(dpr > 0 ? dpr : qApp->devicePixelRatio());
++    QImage image(qRound(width * dpiRatio), qRound(height * dpiRatio), QImage::Format_RGBA64_Premultiplied);
++    image.setDevicePixelRatio(dpiRatio);
++    image.fill(Qt::transparent);
+ 
+     QRadialGradient gradient(64, height - 64, 64);
+     QColor radialColor = backgroundRadialColor(color);
+@@ -409,13 +492,15 @@ QPixmap Helper::radialGradient(const QColor &color, int width, int height, qreal
+     radialColor.setAlpha(0);
+     gradient.setColorAt(1, radialColor);
+ 
+-    QPainter painter(&pixmap);
++    QPainter painter(&image);
+     painter.setViewport(0, 0, width, height);
+     painter.setWindow(0, 0, 128, height);
+     painter.fillRect(QRect(0, 0, 128, height), gradient);
+ 
+     painter.end();
+ 
++    const QPixmap pixmap(QPixmap::fromImage(ditherToArgb32(image)));
++
+     _backgroundCache.insert(key, new QPixmap(pixmap));
+ 
+     return pixmap;
