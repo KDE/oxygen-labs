@@ -1,0 +1,148 @@
+diff --git a/src/ksvg/private/svg_p.h b/src/ksvg/private/svg_p.h
+index 3b81fd52..2b46b051 100644
+--- a/src/ksvg/private/svg_p.h
++++ b/src/ksvg/private/svg_p.h
+@@ -36,9 +36,16 @@ public:
+ 
+     void reload();
+ 
++    //* true if a Plasma theme file contains gradients, whose rendering gets dithered to avoid banding
++    bool hasGradients() const
++    {
++        return m_hasGradients;
++    }
++
+ private:
+     bool load(const QByteArray &contents, const QString &styleSheet, QHash<QString, QRectF> &interestingElements);
+ 
++    bool m_hasGradients = false;
+     QString m_filename;
+     QString m_styleSheet;
+     QHash<QString, QRectF> m_interestingElements;
+diff --git a/src/ksvg/svg.cpp b/src/ksvg/svg.cpp
+index 208f50eb..5cb7d5d1 100644
+--- a/src/ksvg/svg.cpp
++++ b/src/ksvg/svg.cpp
+@@ -17,8 +17,10 @@
+ #include <QBuffer>
+ #include <QCoreApplication>
+ #include <QDir>
++#include <QImage>
+ #include <QPainter>
+ #include <QRegularExpression>
++#include <QRgba64>
+ #include <QStringBuilder>
+ #include <QXmlStreamReader>
+ #include <QXmlStreamWriter>
+@@ -71,6 +73,50 @@ Q_GLOBAL_STATIC(SvgRectsCacheSingleton, privateSvgRectsCacheSelf)
+ 
+ const size_t SvgRectsCache::s_seed = 0x9e3779b9;
+ 
++namespace
++{
++/*
++ * Gradients in theme SVGs often span only a few 8-bit levels over hundreds of pixels
++ * (dialog and panel backgrounds), so plain rounding produces wide visible bands.
++ * Theme files with gradients are therefore rendered at 16 bits per channel and quantized
++ * with 8x8 ordered dithering. This makes the banding go away.
++ */
++QImage ditherToArgb32(const QImage &source)
++{
++    Q_ASSERT(source.format() == QImage::Format_RGBA64_Premultiplied);
++
++    static constexpr int bayer[8][8] = {{0, 32, 8, 40, 2, 34, 10, 42},
++                                        {48, 16, 56, 24, 50, 18, 58, 26},
++                                        {12, 44, 4, 36, 14, 46, 6, 38},
++                                        {60, 28, 52, 20, 62, 30, 54, 22},
++                                        {3, 35, 11, 43, 1, 33, 9, 41},
++                                        {51, 19, 59, 27, 49, 17, 57, 25},
++                                        {15, 47, 7, 39, 13, 45, 5, 37},
++                                        {63, 31, 55, 23, 61, 29, 53, 21}};
++
++    QImage image(source.size(), QImage::Format_ARGB32_Premultiplied);
++    image.setDevicePixelRatio(source.devicePixelRatio());
++
++    constexpr qreal scale(1.0 / 257.0);
++    for (int y = 0; y < source.height(); ++y) {
++        const auto in = reinterpret_cast<const QRgba64 *>(source.constScanLine(y));
++        auto out = reinterpret_cast<QRgb *>(image.scanLine(y));
++        for (int x = 0; x < source.width(); ++x) {
++            const qreal threshold((bayer[y & 7][x & 7] + 0.5) / 64.0 - 0.5);
++            const auto quantize = [threshold](quint16 value) {
++                return qBound(0, qRound(value * scale + threshold), 255);
++            };
++
++            // keep the premultiplied invariant: no color channel above alpha
++            const int alpha(quantize(in[x].alpha()));
++            out[x] = qRgba(qMin(quantize(in[x].red()), alpha), qMin(quantize(in[x].green()), alpha), qMin(quantize(in[x].blue()), alpha), alpha);
++        }
++    }
++
++    return image;
++}
++}
++
+ SharedSvgRenderer::SharedSvgRenderer(QObject *parent)
+     : QSvgRenderer(parent)
+ {
+@@ -107,6 +153,9 @@ void SharedSvgRenderer::reload()
+ 
+ bool SharedSvgRenderer::load(const QByteArray &contents, const QString &styleSheet, QHash<QString, QRectF> &interestingElements)
+ {
++    // Needed for dithering; matches both linearGradient and radialGradient
++    m_hasGradients = contents.contains("Gradient");
++
+     // Apply the style sheet.
+     if (!styleSheet.isEmpty() && contents.contains("current-color-scheme")) {
+         QByteArray processedContents;
+@@ -449,7 +498,8 @@ QString SvgPrivate::cachePath(const QString &id, const QSize &size) const
+     const size_t colorsHash = qHashRange(parts.begin(), parts.end(), SvgRectsCache::s_seed);
+ 
+     auto cacheId = CacheId{double(size.width()), double(size.height()), path, id, status, devicePixelRatio, colorSet, colorsHash, 0, lastModified};
+-    return QString::number(qHash(cacheId, SvgRectsCache::s_seed));
++    // the suffix versions the rendering, so pixmaps cached before gradients were dithered get re-rendered
++    return QString::number(qHash(cacheId, SvgRectsCache::s_seed)) + QLatin1String("-d1");
+ }
+ 
+ bool SvgPrivate::setImagePath(const QString &imagePath)
+@@ -613,20 +663,31 @@ QPixmap SvgPrivate::findInCache(const QString &elementId, qreal ratio, const QSi
+ 
+     QRectF finalRect = makeUniform(renderer->boundsOnElement(actualElementId), QRect(QPoint(0, 0), size));
+ 
++    const auto render = [&](QPaintDevice *device) {
++        QPainter renderPainter(device);
++        if (actualElementId.isEmpty()) {
++            renderer->render(&renderPainter, finalRect);
++        } else {
++            renderer->render(&renderPainter, actualElementId, finalRect);
++        }
++    };
++
+     // don't alter the pixmap size or it won't match up properly to, e.g., FrameSvg elements
+     // makeUniform should never change the size so much that it gains or loses a whole pixel
+-    p = QPixmap(size);
+-
+-    p.fill(Qt::transparent);
+-    QPainter renderPainter(&p);
+-
+-    if (actualElementId.isEmpty()) {
+-        renderer->render(&renderPainter, finalRect);
++    // dither only theme graphics (backgrounds, frames, widgets) that contain gradients
++    const bool dither = themed && renderer->hasGradients();
++    if (dither) {
++        // render gradients at 16 bits per channel and dither down to avoid banding
++        QImage image(size, QImage::Format_RGBA64_Premultiplied);
++        image.fill(Qt::transparent);
++        render(&image);
++        p = QPixmap::fromImage(ditherToArgb32(image));
+     } else {
+-        renderer->render(&renderPainter, actualElementId, finalRect);
++        p = QPixmap(size);
++        p.fill(Qt::transparent);
++        render(&p);
+     }
+ 
+-    renderPainter.end();
+     p.setDevicePixelRatio(ratio);
+ 
+     if (cacheRendering) {
