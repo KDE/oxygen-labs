@@ -1,2 +1,18 @@
-/build*/
-/CMakeUserPresets.json
+# Build directories
+/build/
+/build-*/
+build/
+build-*/
+
+# CMake and build artifacts
+CMakeUserPresets.json
+.cmake/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+*.cmake.in.user
+Testing/
+.ninja_*
+build.ninja
+CMakeCache.txt
