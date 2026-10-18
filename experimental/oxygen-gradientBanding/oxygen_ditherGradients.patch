@@ -1,5 +1,150 @@
+diff --git a/kstyle/oxygenstyle.cpp b/kstyle/oxygenstyle.cpp
+index 3c2eb6c..445d8c6 100644
+--- a/kstyle/oxygenstyle.cpp
++++ b/kstyle/oxygenstyle.cpp
+@@ -3302,13 +3302,14 @@ bool Style::drawFrameGroupBoxPrimitive(const QStyleOption *option, QPainter *pai
+     painter->setRenderHint(QPainter::Antialiasing);
+     painter->setPen(Qt::NoPen);
+ 
+-    QLinearGradient innerGradient(0, rect.top() - rect.height() + 12, 0, rect.bottom() + rect.height() - 19);
+-    QColor light(_helper->calcLightColor(base));
+-    light.setAlphaF(0.4);
+-    innerGradient.setColorAt(0, light);
+-    light.setAlphaF(0);
+-    innerGradient.setColorAt(1, light);
+-    painter->setBrush(innerGradient);
++    // dithered gradient, to avoid banding over large group boxes
++    const qreal dpr(_helper->devicePixelRatio(painter));
++    QBrush innerBrush(_helper->groupBoxGradient(base, rect.height(), dpr));
++    QTransform brushTransform;
++    brushTransform.translate(rect.left(), rect.top());
++    brushTransform.scale(1.0 / dpr, 1.0 / dpr);
++    innerBrush.setTransform(brushTransform);
++    painter->setBrush(innerBrush);
+     painter->setClipRect(rect.adjusted(0, 0, 0, -19));
+     _helper->fillSlab(*painter, rect);
+ 
+diff --git a/kstyle/oxygenstylehelper.cpp b/kstyle/oxygenstylehelper.cpp
+index a55b303..b25c8ce 100644
+--- a/kstyle/oxygenstylehelper.cpp
++++ b/kstyle/oxygenstylehelper.cpp
+@@ -12,6 +12,8 @@
+ #include <KColorScheme>
+ #include <KColorUtils>
+ 
++#include <QApplication>
++#include <QImage>
+ #include <QLinearGradient>
+ #include <QPainter>
+ #include <QTextStream>
+@@ -48,6 +50,7 @@ void StyleHelper::invalidateCaches(void)
+     _midColorCache.clear();
+ 
+     _dockWidgetButtonCache.clear();
++    _groupBoxGradientCache.clear();
+     _progressBarCache.clear();
+     _cornerCache.clear();
+     _selectionCache.clear();
+@@ -76,6 +79,7 @@ void StyleHelper::setMaxCacheSize(int value)
+     _scrollHandleCache.setMaxCacheSize(value);
+ 
+     _dockWidgetButtonCache.setMaxCost(value);
++    _groupBoxGradientCache.setMaxCost(value);
+     _progressBarCache.setMaxCost(value);
+     _cornerCache.setMaxCost(value);
+     _selectionCache.setMaxCost(value);
+@@ -330,17 +334,20 @@ TileSet StyleHelper::slope(const QColor &color, qreal shade, int size)
+         return *cachedTileSet;
+     }
+ 
+-    QPixmap pixmap(highDpiPixmap(size * 4));
+-    pixmap.fill(Qt::transparent);
++    // painted at 16 bits per channel, then dithered down, to avoid banding in the bottom fade
++    const qreal dpr(qApp->devicePixelRatio());
++    QImage image(qRound(size * 4 * dpr), qRound(size * 4 * dpr), QImage::Format_RGBA64_Premultiplied);
++    image.setDevicePixelRatio(dpr);
++    image.fill(Qt::transparent);
+ 
+-    QPainter painter(&pixmap);
++    QPainter painter(&image);
+     painter.setPen(Qt::NoPen);
+ 
+     // edges
+     TileSet slabTileSet = slab(color, shade, size);
+     slabTileSet.render(QRect(0, 0, size * 4, size * 5), &painter, TileSet::Left | TileSet::Right | TileSet::Top);
+ 
+-    int fixedSize(28 * devicePixelRatio(pixmap));
++    int fixedSize(28 * dpr);
+     painter.setWindow(0, 0, fixedSize, fixedSize);
+ 
+     // bottom
+@@ -365,7 +372,7 @@ TileSet StyleHelper::slope(const QColor &color, qreal shade, int size)
+ 
+     painter.end();
+ 
+-    TileSet tileSet(pixmap, size, size, size * 2, 2);
++    TileSet tileSet(ditheredPixmap(image), size, size, size * 2, 2);
+     _slopeCache.insert(key, new TileSet(tileSet));
+     return tileSet;
+ }
+@@ -388,6 +395,31 @@ void StyleHelper::drawInverseShadow(QPainter &painter, const QColor &color, int
+     painter.drawEllipse(QRectF(pad - fuzz, pad - fuzz, size + fuzz * 2.0, size + fuzz * 2.0));
+ }
+ 
++//________________________________________________________________________________________________________
++QPixmap StyleHelper::groupBoxGradient(const QColor &color, int height, qreal dpr)
++{
++    const quint64 dprKey(quint64(qRound(dpr * 64.0)));
++    const quint64 key((colorKey(color) << 32) | (dprKey << 16) | quint64(qBound(0, height, 0xffff)));
++    if (QPixmap *cachedPixmap = _groupBoxGradientCache.object(key)) {
++        return *cachedPixmap;
++    }
++
++    // same as QLinearGradient(0, top - height + 12, 0, bottom + height - 19), relative to the top
++    QColor light(calcLightColor(color));
++    light.setAlphaF(0.4);
++    QColor transparent(light);
++    transparent.setAlphaF(0);
++
++    QImage image(ditheredVerticalGradient({{0.0, light}, {1.0, transparent}}, -height + 12, 2 * height - 20, height, dpr));
++
++    // device pixels only: a texture brush with a devicePixelRatio would be emulated (and resampled) by QPainter
++    image.setDevicePixelRatio(1);
++    const QPixmap pixmap(QPixmap::fromImage(image));
++
++    _groupBoxGradientCache.insert(key, new QPixmap(pixmap));
++    return pixmap;
++}
++
+ //________________________________________________________________________________________________________
+ void StyleHelper::fillSlab(QPainter &painter, const QRect &rect, int size) const
+ {
+diff --git a/kstyle/oxygenstylehelper.h b/kstyle/oxygenstylehelper.h
+index 907d3d2..fc77b28 100644
+--- a/kstyle/oxygenstylehelper.h
++++ b/kstyle/oxygenstylehelper.h
+@@ -115,6 +115,9 @@ public:
+     //* groupbox background
+     TileSet slope(const QColor &, qreal shade, int size = TileSet::DefaultSize);
+ 
++    //* dithered group box background gradient, in device pixels (devicePixelRatio 1)
++    QPixmap groupBoxGradient(const QColor &, int height, qreal dpr);
++
+     //*@name slabs
+     //@{
+ 
+@@ -262,6 +265,9 @@ private:
+     //* dock button cache
+     PixmapCache _dockWidgetButtonCache;
+ 
++    //* group box gradient cache
++    PixmapCache _groupBoxGradientCache;
++
+     using TileSetCache = BaseCache<TileSet>;
+     TileSetCache _slabSunkenCache;
+     TileSetCache _cornerCache;
 diff --git a/liboxygen/oxygenhelper.cpp b/liboxygen/oxygenhelper.cpp
-index 812b9625..66805e28 100644
+index 812b962..ce2afa6 100644
 --- a/liboxygen/oxygenhelper.cpp
 +++ b/liboxygen/oxygenhelper.cpp
 @@ -15,7 +15,9 @@
@@ -12,7 +157,7 @@ index 812b9625..66805e28 100644
  #include <QTextStream>
  #include <math.h>
  
-@@ -27,6 +29,59 @@
+@@ -27,6 +29,62 @@
  #endif
  #endif
  
@@ -20,7 +165,10 @@ index 812b9625..66805e28 100644
 +{
 +/*
 + * Oxygen's window background gradients span only a few 8-bit levels over hundreds of pixels,
-+ * so plain rounding produces wide visible bands. This makes the banding go away.
++ * so plain rounding produces wide visible bands. They are therefore computed at higher
++ * precision and quantized with 8x8 ordered dithering. The threshold stays strictly inside
++ * (-0.5, 0.5) of an 8-bit step, so colors that are exactly representable come out unchanged
++ * and only actual gradients receive the (invisible, +/-1 level) dither pattern.
 + */
 +inline qreal ditherThreshold(int x, int y)
 +{
@@ -72,13 +220,19 @@ index 812b9625..66805e28 100644
  namespace Oxygen
  {
  const qreal Helper::_slabThickness = 0.45;
-@@ -368,18 +423,43 @@ QPixmap Helper::verticalGradient(const QColor &color, int height, int offset, qr
+@@ -368,23 +426,71 @@ QPixmap Helper::verticalGradient(const QColor &color, int height, int offset, qr
          return *cachedPixmap;
      }
  
 -    QPixmap pixmap(highDpiPixmap(1, height, dpr));
 -    pixmap.fill(Qt::transparent);
--
++    // stops are rounded to 8 bits first: the gradient must end on exactly the color that
++    // the flat area below it is filled with, otherwise the dithered end of the gradient
++    // averages to the unrounded color and a faint step shows where the dithering stops
++    const QGradientStops stops{{0.0, QColor::fromRgba(backgroundTopColor(color).rgba())},
++                               {0.5, QColor::fromRgba(color.rgba())},
++                               {1.0, QColor::fromRgba(backgroundBottomColor(color).rgba())}};
+ 
 -    QLinearGradient gradient(0, offset, 0, height);
 -    gradient.setColorAt(0.0, backgroundTopColor(color));
 -    gradient.setColorAt(0.5, color);
@@ -86,48 +240,70 @@ index 812b9625..66805e28 100644
 -
 -    QPainter painter(&pixmap);
 -    painter.fillRect(pixmap.rect(), gradient);
-+    // computed directly rather than painted, so it can be dithered (see ditheredPixel);
-+    // equivalent to QLinearGradient(0, offset, 0, height) with stops at 0, 0.5 and 1.
-+    // The tile is 8 device pixels wide so it can hold the 2D dither pattern
+-
+-    painter.end();
++    // equivalent to QLinearGradient(0, offset, 0, height)
 +    const qreal dpiRatio(dpr > 0 ? dpr : qApp->devicePixelRatio());
-+    QImage image(8, qRound(height * dpiRatio), QImage::Format_ARGB32_Premultiplied);
-+    image.setDevicePixelRatio(dpiRatio);
++    const QImage image(ditheredVerticalGradient(stops, offset, offset + qMax(1, height - offset), height, dpiRatio));
++    const QPixmap pixmap(QPixmap::fromImage(image));
+ 
+     _backgroundCache.insert(key, new QPixmap(pixmap));
+     return pixmap;
+ }
+ 
++//____________________________________________________________________
++QPixmap Helper::ditheredPixmap(const QImage &image) const
++{
++    return QPixmap::fromImage(ditherToArgb32(image));
++}
 +
-+    // stops are rounded to 8 bits first: the gradient must end on exactly the color that
-+    // the flat area below it is filled with, otherwise the dithered end of the gradient
-+    // averages to the unrounded color and a faint step shows where the dithering stops
-+    const QColor stops[3] = {QColor::fromRgba(backgroundTopColor(color).rgba()),
-+                             QColor::fromRgba(color.rgba()),
-+                             QColor::fromRgba(backgroundBottomColor(color).rgba())};
-+    const qreal span(qMax<qreal>(1, height - offset));
++//____________________________________________________________________
++QImage Helper::ditheredVerticalGradient(const QGradientStops &stops, qreal start, qreal end, int height, qreal dpr) const
++{
++    Q_ASSERT(stops.size() >= 2);
 +
++    // computed directly rather than painted, so it can be dithered (see ditheredPixel).
++    // The tile is 8 device pixels wide so it can hold the 2D dither pattern
++    QImage image(8, qMax(1, qRound(height * dpr)), QImage::Format_ARGB32_Premultiplied);
++    image.setDevicePixelRatio(dpr);
++
++    const qreal span(end - start);
 +    for (int y = 0; y < image.height(); ++y) {
 +        // gradient position at the device pixel center, in logical coordinates, padded at both ends
-+        const qreal t(qBound<qreal>(0, ((y + 0.5) / dpiRatio - offset) / span, 1));
-+        const QColor &from(stops[t < 0.5 ? 0 : 1]);
-+        const QColor &to(stops[t < 0.5 ? 1 : 2]);
-+        const qreal f(t < 0.5 ? 2 * t : 2 * t - 1);
++        const qreal t(span > 0 ? qBound<qreal>(0, ((y + 0.5) / dpr - start) / span, 1) : 0);
 +
-+        const qreal alpha(255 * (from.alphaF() + (to.alphaF() - from.alphaF()) * f));
-+        const auto channel = [f, alpha](float a, float b) {
-+            return alpha * (a + (b - a) * f);
++        int index(1);
++        while (index < stops.size() - 1 && stops.at(index).first < t) {
++            ++index;
++        }
++
++        const QColor &from(stops.at(index - 1).second);
++        const QColor &to(stops.at(index).second);
++        const qreal range(stops.at(index).first - stops.at(index - 1).first);
++        const qreal f(range > 0 ? qBound<qreal>(0, (t - stops.at(index - 1).first) / range, 1) : 0);
++
++        // interpolate premultiplied colors, like QGradient does
++        const auto channel = [f](qreal a, qreal b) {
++            return 255 * (a + (b - a) * f);
 +        };
-+        const qreal red(channel(from.redF(), to.redF()));
-+        const qreal green(channel(from.greenF(), to.greenF()));
-+        const qreal blue(channel(from.blueF(), to.blueF()));
++        const qreal alpha(channel(from.alphaF(), to.alphaF()));
++        const qreal red(channel(from.redF() * from.alphaF(), to.redF() * to.alphaF()));
++        const qreal green(channel(from.greenF() * from.alphaF(), to.greenF() * to.alphaF()));
++        const qreal blue(channel(from.blueF() * from.alphaF(), to.blueF() * to.alphaF()));
 +
 +        auto line = reinterpret_cast<QRgb *>(image.scanLine(y));
 +        for (int x = 0; x < image.width(); ++x) {
 +            line[x] = ditheredPixel(red, green, blue, alpha, x, y);
 +        }
 +    }
- 
--    painter.end();
-+    const QPixmap pixmap(QPixmap::fromImage(image));
- 
-     _backgroundCache.insert(key, new QPixmap(pixmap));
-     return pixmap;
-@@ -395,8 +475,11 @@ QPixmap Helper::radialGradient(const QColor &color, int width, int height, qreal
++
++    return image;
++}
++
+ //____________________________________________________________________
+ QPixmap Helper::radialGradient(const QColor &color, int width, int height, qreal dpr)
+ {
+@@ -395,8 +501,11 @@ QPixmap Helper::radialGradient(const QColor &color, int width, int height, qreal
          return *cachedPixmap;
      }
  
@@ -141,7 +317,7 @@ index 812b9625..66805e28 100644
  
      QRadialGradient gradient(64, height - 64, 64);
      QColor radialColor = backgroundRadialColor(color);
-@@ -409,13 +492,15 @@ QPixmap Helper::radialGradient(const QColor &color, int width, int height, qreal
+@@ -409,13 +518,15 @@ QPixmap Helper::radialGradient(const QColor &color, int width, int height, qreal
      radialColor.setAlpha(0);
      gradient.setColorAt(1, radialColor);
  
@@ -158,3 +334,27 @@ index 812b9625..66805e28 100644
      _backgroundCache.insert(key, new QPixmap(pixmap));
  
      return pixmap;
+diff --git a/liboxygen/oxygenhelper.h b/liboxygen/oxygenhelper.h
+index 5241a0e..953698c 100644
+--- a/liboxygen/oxygenhelper.h
++++ b/liboxygen/oxygenhelper.h
+@@ -21,6 +21,7 @@
+ #include <KStatefulBrush>
+ 
+ #include <QBitmap>
++#include <QBrush>
+ #include <QCache>
+ #include <QColor>
+ #include <QPainterPath>
+@@ -453,6 +454,12 @@ protected:
+         return color.isValid() ? color.rgba() : 0;
+     }
+ 
++    //* reduce an image painted at 16 bits per channel (Format_RGBA64_Premultiplied) to a dithered 8 bit pixmap
++    QPixmap ditheredPixmap(const QImage &image) const;
++
++    //* dithered, 8 device pixel wide vertical gradient tile, equivalent to QLinearGradient(0, start, 0, end)
++    QImage ditheredVerticalGradient(const QGradientStops &stops, qreal start, qreal end, int height, qreal dpr) const;
++
+     //* generic outer shadow (to be stored in tilesets)
+     virtual void drawShadow(QPainter &, const QColor &, int size);
