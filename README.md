@@ -37,12 +37,18 @@ a separate weather applet based on KDE Weather Report and its original
 authors' work, with an experimental Oxygen-oriented layout. Enable it explicitly
 with `-DBUILD_OXYGEN_WEATHER=ON`; it does not replace the upstream applet.
 
-[plasma-icon-configuration](testing/plasma-icon-configuration/) is in
-**testing/**: Plasma Workspace **v6.7.4** KCM integration, opt-in CMake
+[plasma-icon-configuration](experimental/plasma-icon-configuration/) is in
+**experimental/**: Plasma Workspace **v6.7.4** KCM integration, opt-in CMake
 build/installer and rollback instructions. The implementation currently lives
 in a patch against the pinned Workspace source, not a standalone replacement
 KCM. Oxygen artwork and theme metadata remain in the separate
 [Oxygen Icons project](https://invent.kde.org/frameworks/oxygen-icons).
+
+[ksvg-gradientBanding](experimental/ksvg-gradientBanding/) is in
+**experimental/**: patches and visual comparisons for KSVG gradient banding improvements.
+
+[oxygen-gradientBanding](experimental/oxygen-gradientBanding/) is in
+**experimental/**: patches and visual comparisons for liboxygen window gradient banding improvements.
 
 ## Building the umbrella project
 
@@ -64,7 +70,7 @@ Oxygen artwork is maintained separately and is not installed by this project.
 
 The Plasma patch is based on commit
 `fd05f4c88ab093aee23ce137bf6f2412437c9bba`. Read the
-[build and installation instructions](testing/plasma-icon-configuration/README.md)
+[build and installation instructions](experimental/plasma-icon-configuration/README.md)
 before enabling `INSTALL_PATCHED_ICON_SETTINGS`.
 Installing the Oxygen theme alone does not add configuration to stock Plasma.
 Unpatched desktops ignore the extra metadata and continue using Oxygen normally.

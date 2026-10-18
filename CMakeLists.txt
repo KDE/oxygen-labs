@@ -8,7 +8,7 @@ if(INSTALL_PATCHED_ICON_SETTINGS)
     include(CTest)
 endif()
 
-add_subdirectory(testing/plasma-icon-configuration)
+add_subdirectory(experimental/plasma-icon-configuration)
 
 if(BUILD_OXYGEN_WEATHER)
     add_subdirectory(experimental/oxygen-weather)
