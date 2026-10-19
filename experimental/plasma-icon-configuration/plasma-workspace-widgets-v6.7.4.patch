@@ -672,7 +672,7 @@ index 0000000..dfd3206
 +    }
 +    if (localSource) {
 +        const auto retainedRoot = QFileInfo(retainedSource).path();
-+        if (!QDir().mkpath(retainedRoot) || QFileInfo(retainedRoot).canonicalFilePath() != retainedRoot || QFileInfo::exists(retainedSource)
++        if (!QDir().mkpath(retainedRoot) || QFileInfo(retainedRoot).canonicalFilePath() != retainedRoot || (QFileInfo::exists(retainedSource) && !QDir(retainedSource).removeRecursively())
 +            || QFileInfo(retainedSource).isSymLink()) {
 +            return fail(error, QStringLiteral("Cannot preserve the original user theme."));
 +        }
