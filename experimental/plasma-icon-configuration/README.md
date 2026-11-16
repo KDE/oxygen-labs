@@ -98,3 +98,22 @@ using the theme normally, without configuration controls.
 This is experimental support, not an upstream-approved or released Plasma
 feature. The schema and implementation may change during upstream review.
 The Oxygen Icons README documents its declaration and examples.
+
+## Optional artwork directories
+
+The source theme can list selectable artwork in `X-KDE-OptionalDirectories`
+in its `[Icon Theme]` group, keeping those paths out of `Directories` and
+`ScaledDirectories`. Normal icon lookup does not use this custom key.
+Directory sections and artwork remain present for the configuration installer.
+Every optional directory must have an installation rule that excludes it under
+the declared default values.
+
+When saving, the installer adds only the selected optional directories to the
+installed `Directories` list, before the normal artwork so explicit choices
+have priority. Unselected directories and their sections are omitted from the
+user copy. Reopening the configuration reads the retained source, so a later
+Save can enable or disable each size again. The generated index does not need
+the optional-directory declaration.
+
+Archives must retain optional artwork and any files targeted by its aliases,
+even though those directories are inactive in the shipped index.

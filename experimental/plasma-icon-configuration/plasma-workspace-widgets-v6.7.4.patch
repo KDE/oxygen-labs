@@ -374,10 +374,9 @@ index 0000000..124c8fc
 +bool applyThemeConfiguration(const ThemeConfiguration &configuration, const QMap<QString, bool> &values, QString &error);
 diff --git a/kcms/icons/themeconfig.cpp b/kcms/icons/themeconfig.cpp
 new file mode 100644
-index 0000000..dfd3206
 --- /dev/null
 +++ b/kcms/icons/themeconfig.cpp
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,426 @@
 +// SPDX-FileCopyrightText: 2026 Oxygen contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "themeconfig.h"
@@ -532,8 +531,17 @@ index 0000000..dfd3206
 +        || !boundedText(object.value(QStringLiteral("description"))) || !object.value(QStringLiteral("pages")).isArray()) {
 +        return fail(error, QStringLiteral("Invalid theme configuration schema."));
 +    }
-+    const auto registered = KConfigGroup(&sourceIndex, QStringLiteral("Icon Theme")).readEntry("Directories", QStringList())
-+        + KConfigGroup(&sourceIndex, QStringLiteral("Icon Theme")).readEntry("ScaledDirectories", QStringList());
++    const KConfigGroup themeIndex(&sourceIndex, QStringLiteral("Icon Theme"));
++    const auto active = themeIndex.readEntry("Directories", QStringList()) + themeIndex.readEntry("ScaledDirectories", QStringList());
++    const auto optional = themeIndex.readEntry("X-KDE-OptionalDirectories", QStringList());
++    const auto registered = active + optional;
++    for (const auto &path : optional) {
++        const QFileInfo directory(root + path);
++        if (active.contains(path) || !relativePath(path) || !directory.isDir() || !directory.canonicalFilePath().startsWith(root)
++            || !sourceIndex.hasGroup(path)) {
++            return fail(error, QStringLiteral("Invalid optional icon directory."));
++        }
++    }
 +    for (const auto &path : registered) {
 +        if (!relativePath(path)) {
 +            return fail(error, QStringLiteral("Invalid registered icon directory."));
@@ -614,6 +622,24 @@ index 0000000..dfd3206
 +    }
 +    if (referenced != ids) {
 +        return fail(error, QStringLiteral("Every control must have an installation rule."));
++    }
++    // Every optional directory must be explicitly excluded by the default choices.
++    QMap<QString, bool> defaults;
++    for (const auto &page : result.pages) {
++        for (const auto &control : page.controls) {
++            defaults.insert(control.id, control.defaultValue);
++        }
++    }
++    for (const auto &path : optional) {
++        bool excludedByDefault = false;
++        for (const auto &rule : result.rules) {
++            if (rule.directories.contains(path) && defaults.value(rule.control) == rule.equals) {
++                excludedByDefault = true;
++            }
++        }
++        if (!excludedByDefault) {
++            return fail(error, QStringLiteral("Optional directories must be disabled by default."));
++        }
 +    }
 +    // Nested action roots would make checkbox semantics ambiguous.
 +    for (const auto &a : controlled) {
@@ -736,9 +762,14 @@ index 0000000..dfd3206
 +        KConfigGroup theme(&index, QStringLiteral("Icon Theme"));
 +        for (const auto &key : {QStringLiteral("Directories"), QStringLiteral("ScaledDirectories")}) {
 +            auto directories = theme.readEntry(key, QStringList());
++            if (key == QLatin1String("Directories")) {
++                // Selected optional artwork takes precedence over the base theme.
++                directories = theme.readEntry("X-KDE-OptionalDirectories", QStringList()) + directories;
++            }
 +            directories.removeIf(omitted);
 +            theme.writeEntry(key, directories);
 +        }
++        theme.deleteEntry("X-KDE-OptionalDirectories");
 +        for (const auto &group : index.groupList()) {
 +            if (omitted(group)) {
 +                index.deleteGroup(group);
@@ -998,10 +1029,9 @@ index 0000000..556a752
 +set_tests_properties(themeconfigtest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 diff --git a/kcms/icons/autotests/themeconfigtest.cpp b/kcms/icons/autotests/themeconfigtest.cpp
 new file mode 100644
-index 0000000..02af6dc
 --- /dev/null
 +++ b/kcms/icons/autotests/themeconfigtest.cpp
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,419 @@
 +// SPDX-FileCopyrightText: 2026 Oxygen contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "../themeconfig.h"
@@ -1111,6 +1141,46 @@ index 0000000..02af6dc
 +        QVERIFY(QFileInfo::exists(m_source->path() + QStringLiteral("/applets/32/test-symbolic.svg")));
 +        QVERIFY(!applyThemeConfiguration(configuration, {}, error));
 +        QVERIFY(!applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}, {QStringLiteral("extra"), true}}, error));
++    }
++    void testOptionalDirectoriesAreOptIn()
++    {
++        write(QStringLiteral("index.theme"),
++              "[Icon Theme]\nName=Fixture\nX-KDE-IconConfiguration=DeclarativeV1\nDirectories=base/32\n"
++              "X-KDE-OptionalDirectories=applets/32\n[base/32]\nSize=32\nType=Fixed\n[applets/32]\nSize=32\nType=Fixed\n");
++        auto pages = m_declaration.value(QStringLiteral("pages")).toArray();
++        auto page = pages[0].toObject();
++        auto controls = page.value(QStringLiteral("controls")).toArray();
++        auto control = controls[0].toObject();
++        control[QStringLiteral("default")] = false;
++        controls[0] = control;
++        page[QStringLiteral("controls")] = controls;
++        pages[0] = page;
++        m_declaration[QStringLiteral("pages")] = pages;
++        declaration(m_declaration);
++        ThemeConfiguration configuration;
++        QString error;
++        QVERIFY2(readThemeConfiguration(m_source->path(), configuration, error), qPrintable(error));
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), false}}, error), qPrintable(error));
++        {
++            KConfig saved(m_output + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++            QCOMPARE(KConfigGroup(&saved, QStringLiteral("Icon Theme")).readEntry("Directories", QStringList()), QStringList{QStringLiteral("base/32")});
++            QVERIFY(!QFileInfo::exists(m_output + QStringLiteral("/applets/32")));
++        }
++        QVERIFY2(applyThemeConfiguration(configuration, {{QStringLiteral("symbolic"), true}}, error), qPrintable(error));
++        {
++            KConfig saved(m_output + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++            const QStringList selected{QStringLiteral("applets/32"), QStringLiteral("base/32")};
++            QCOMPARE(KConfigGroup(&saved, QStringLiteral("Icon Theme")).readEntry("Directories", QStringList()), selected);
++            QVERIFY(QFileInfo::exists(m_output + QStringLiteral("/applets/32/test-symbolic.svg")));
++        }
++        ThemeConfiguration reopened;
++        QVERIFY2(readThemeConfiguration(m_output, reopened, error), qPrintable(error));
++        QVERIFY2(applyThemeConfiguration(reopened, {{QStringLiteral("symbolic"), false}}, error), qPrintable(error));
++        KConfig saved(m_output + QStringLiteral("/index.theme"), KConfig::SimpleConfig);
++        QCOMPARE(KConfigGroup(&saved, QStringLiteral("Icon Theme")).readEntry("Directories", QStringList()), QStringList{QStringLiteral("base/32")});
++        // A declaration cannot quietly activate optional artwork by default.
++        declaration(fixture());
++        QVERIFY(!readThemeConfiguration(m_source->path(), configuration, error));
 +    }
 +    void testUserThemeKeepsIdentityAndOriginalArtwork()
 +    {
