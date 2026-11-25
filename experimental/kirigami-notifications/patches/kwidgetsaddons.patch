@@ -1,0 +1,28 @@
+diff --git a/src/kmessagewidget.cpp b/src/kmessagewidget.cpp
+index 7a098ba..41a30ed 100644
+--- a/src/kmessagewidget.cpp
++++ b/src/kmessagewidget.cpp
+@@ -361,11 +361,21 @@ void KMessageWidget::paintEvent(QPaintEvent *event)
+     if (d->timeLine->state() == QTimeLine::Running) {
+         painter.setOpacity(d->timeLine->currentValue() * d->timeLine->currentValue());
+     }
++    const QColor color = palette().color(QPalette::Window);
++    const QColor parentWindowColor = (parentWidget() ? parentWidget()->palette() : qApp->palette()).color(QPalette::Window);
++    const uint element = style()->property("kdeInlineMessageControlElement").toUInt();
++    if (element) {
++        QStyleOption option;
++        option.initFrom(this);
++        option.palette.setColor(QPalette::Window, parentWindowColor);
++        option.palette.setColor(QPalette::Highlight, color);
++        style()->drawControl(static_cast<QStyle::ControlElement>(element), &option, &painter, this);
++        return;
++    }
++
+     constexpr float radius = 4 * 0.6;
+     const QRect innerRect = rect().marginsRemoved(QMargins() + borderSize / 2);
+-    const QColor color = palette().color(QPalette::Window);
+     constexpr float alpha = 0.2;
+-    const QColor parentWindowColor = (parentWidget() ? parentWidget()->palette() : qApp->palette()).color(QPalette::Window);
+     const int newRed = (color.red() * alpha) + (parentWindowColor.red() * (1 - alpha));
+     const int newGreen = (color.green() * alpha) + (parentWindowColor.green() * (1 - alpha));
+     const int newBlue = (color.blue() * alpha) + (parentWindowColor.blue() * (1 - alpha));

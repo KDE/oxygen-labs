@@ -50,6 +50,15 @@ KCM. Oxygen artwork and theme metadata remain in the separate
 [oxygen-gradientBanding](experimental/oxygen-gradientBanding/) is in
 **experimental/**: patches and visual comparisons for liboxygen window gradient banding improvements.
 
+[Oxygen switches](experimental/oxygen-switch/) is in **experimental/**.
+It includes the Oxygen and QQC2 Desktop Style switch patch and a Qt Quick
+preview for switches and switch delegates.
+
+[Kirigami inline notifications](experimental/kirigami-notifications/) is in
+**experimental/**. Its KDE patches give Kirigami messages and native
+KMessageWidget notifications a shared Oxygen frame. The component includes
+an interactive preview and the SVG design reference.
+
 ## Building the umbrella project
 
 The default build downloads nothing and installs nothing. Enable the icon

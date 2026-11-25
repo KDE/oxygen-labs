@@ -1,0 +1,143 @@
+Subject: [PATCH] Paint inline messages and provide their content padding
+Base-commit: 16a1f518f1f2d498ab4a64ee8d0e43a87777359a
+
+diff --git a/kstyle/oxygenstyle.cpp b/kstyle/oxygenstyle.cpp
+index 58c9f512335c3847653bf47fd6945870e403ecf7..e6e8be92ccfb1305f93b37603929ea3cb6202d5e 100644
+--- a/kstyle/oxygenstyle.cpp
++++ b/kstyle/oxygenstyle.cpp
+@@ -197,6 +197,7 @@ Style::Style(void)
+     , _splitterFactory(new SplitterFactory(this))
+     , SH_ArgbDndWindow(newStyleHint(QStringLiteral("SH_ArgbDndWindow")))
+     , CE_CapacityBar(newControlElement(QStringLiteral("CE_CapacityBar")))
++    , CE_InlineMessage(newControlElement(QStringLiteral("CE_InlineMessage")))
+ {
+     // use DBus connection to update on oxygen configuration change
+     QDBusConnection dbus = QDBusConnection::sessionBus();
+@@ -1032,13 +1033,88 @@ void Style::drawPrimitive(PrimitiveElement element, const QStyleOption *option,
+     painter->restore();
+ }
+ 
++//______________________________________________________________
++QVariantMap Style::inlineMessageColors() const
++{
++    // KWidgetsAddons uses these accents for KMessageWidget.
++    return {{QStringLiteral("positive"), QColor(39, 174, 96)},
++            {QStringLiteral("information"), QColor(61, 174, 233)},
++            {QStringLiteral("warning"), QColor(246, 116, 0)},
++            {QStringLiteral("error"), QColor(218, 68, 83)}};
++}
++
++QSize Style::inlineMessagePadding() const
++{
++    return QSize(Metrics::Layout_ChildMarginWidth + Metrics::Layout_DefaultSpacing, Metrics::Layout_ChildMarginWidth + Metrics::Frame_FrameWidth);
++}
++
++bool Style::drawInlineMessage(const QStyleOption *option, QPainter *painter, const QWidget *) const
++{
++    if (!option || option->rect.isEmpty()) {
++        return false;
++    }
++
++    const QColor accent = option->palette.color(QPalette::Highlight);
++    const QRectF frame = QRectF(option->rect).adjusted(1, 1, -1, -2);
++    if (frame.isEmpty()) {
++        return false;
++    }
++    const qreal radius = qMin(4.0, qMin(frame.width(), frame.height()) / 2.0);
++    QPainterPath outline;
++    outline.addRoundedRect(frame, radius, radius);
++    const QRectF inner = frame.adjusted(1, 1, -1, -1);
++    QPainterPath face;
++    if (!inner.isEmpty()) {
++        face.addRoundedRect(inner, qMax(0.0, radius - 1), qMax(0.0, radius - 1));
++    }
++
++    painter->save();
++    painter->setRenderHint(QPainter::Antialiasing);
++
++    // Approximate the clipped, downward-offset blur with concentric bands.
++    QPainterPath halo;
++    halo.addRoundedRect(frame.adjusted(-1, -1, 1, 2), radius + 1, radius + 1);
++    painter->fillPath(halo.subtracted(outline), QColor(0, 0, 0, 5));
++    QPainterPath shadow;
++    shadow.addRoundedRect(frame.adjusted(-1, 0, 1, 2), radius + 1, radius + 1);
++    painter->fillPath(shadow.subtracted(outline), QColor(0, 0, 0, 23));
++    painter->fillPath(outline.translated(0, 1).subtracted(outline), QColor(0, 0, 0, 81));
++
++    QLinearGradient rim(frame.topLeft(), frame.bottomLeft());
++    rim.setColorAt(0, KColorUtils::mix(accent, Qt::white, 0.155));
++    rim.setColorAt(1, QColor::fromHslF(accent.hslHueF(), accent.hslSaturationF(), qMax(0.0, accent.lightnessF() - 0.095)));
++    painter->fillPath(outline.subtracted(face), rim);
++
++    if (!face.isEmpty()) {
++        QColor tint = QColor::fromHslF(accent.hslHueF(), accent.hslSaturationF(), qMax(0.0, accent.lightnessF() - 0.086));
++        tint.setAlpha(134);
++        const QPointF bottom = inner.bottomLeft() - QPointF(0, 1);
++        // The SVG's white stop is well above the face, leaving a saturated fill.
++        QLinearGradient wash(bottom - QPointF(0, inner.height() * 71.558 / 44.0), bottom);
++        wash.setInterpolationMode(QGradient::ComponentInterpolation);
++        wash.setColorAt(0, QColor(255, 255, 255, 147));
++        wash.setColorAt(1, tint);
++        painter->fillPath(face, wash);
++
++        // The top highlight follows the corners and peaks at the center.
++        QLinearGradient gleam(inner.topLeft(), inner.topRight());
++        gleam.setColorAt(0, QColor(255, 255, 255, 73));
++        gleam.setColorAt(0.5, QColor(255, 255, 255, 127));
++        gleam.setColorAt(1, QColor(255, 255, 255, 73));
++        painter->fillPath(face.subtracted(face.translated(0, 1)), gleam);
++    }
++    painter->restore();
++    return true;
++}
++
+ //______________________________________________________________
+ void Style::drawControl(ControlElement element, const QStyleOption *option, QPainter *painter, const QWidget *widget) const
+ {
+     StyleControl fcn(nullptr);
+     if (element == CE_CapacityBar) {
+         fcn = &Style::drawProgressBarControl;
+-
++    } else if (element == CE_InlineMessage) {
++        fcn = &Style::drawInlineMessage;
+     } else
+         switch (element) {
+         case CE_ComboBoxLabel:
+diff --git a/kstyle/oxygenstyle.h b/kstyle/oxygenstyle.h
+index c094c2e4ed5942e2d3e7329573384f1f24256cfd..5c9ecb688ebdccc23edb71ecad94739b5eacb16f 100644
+--- a/kstyle/oxygenstyle.h
++++ b/kstyle/oxygenstyle.h
+@@ -46,6 +46,7 @@
+ #include <QDockWidget>
+ #include <QMdiSubWindow>
+ #include <QStyleOption>
++#include <QVariantMap>
+ #include <QStyleOptionSlider>
+ #include <QStylePlugin>
+ #include <QToolBar>
+@@ -83,6 +84,16 @@ class Style : public KStyle
+     Q_CLASSINFO("X-KDE-CustomElements", "true")
+ 
+ public:
++    Q_PROPERTY(uint kdeInlineMessageControlElement READ inlineMessageControlElement CONSTANT)
++    Q_PROPERTY(QSize kdeInlineMessageHeaderInset READ inlineMessageHeaderInset CONSTANT)
++    Q_PROPERTY(QSize kdeInlineMessagePadding READ inlineMessagePadding CONSTANT)
++    Q_PROPERTY(QVariantMap kdeInlineMessageColors READ inlineMessageColors CONSTANT)
++
++    QVariantMap inlineMessageColors() const;
++    QSize inlineMessageHeaderInset() const { return QSize(Metrics::Layout_TopLevelMarginWidth, 2 * Metrics::Frame_FrameWidth); }
++    QSize inlineMessagePadding() const;
++    uint inlineMessageControlElement() const { return CE_InlineMessage; }
++
+     //* constructor
+     explicit Style(void);
+ 
+@@ -673,6 +684,8 @@ private:
+ 
+     //* styled painting for KCapacityBar
+     QStyle::ControlElement CE_CapacityBar;
++    QStyle::ControlElement CE_InlineMessage;
++    bool drawInlineMessage(const QStyleOption *, QPainter *, const QWidget *) const;
+ 
+     //@}
+ 

@@ -1,0 +1,71 @@
+Subject: [PATCH] Expose inline message layout and close icon to control styles
+Base-commit: 51e5b39b337167b1fd553d34326959f952c3760b
+
+diff --git a/src/templates/InlineMessage.qml b/src/templates/InlineMessage.qml
+index 43e33f38e41dfbb7d8c3f3df78e9f061f8c29fd9..e9188a061322d288ada444e14202b0afb5b258de 100644
+--- a/src/templates/InlineMessage.qml
++++ b/src/templates/InlineMessage.qml
+@@ -217,6 +217,32 @@ T.Control {
+ 
+     implicitHeight: visible ? (contentLayout.implicitHeight + topPadding + bottomPadding) : 0
+ 
++    /*!
++      Left inset for the leading icon, in addition to the control padding.
++      \since 6.33
++    */
++    property real leadingIconInset: Platform.Units.smallSpacing
++    /*!
++      Horizontal spacing between the leading icon and the message.
++      \since 6.33
++    */
++    property real iconLabelSpacing: Platform.Units.largeSpacing
++    /*!
++      Visual adjustment for aligning the message text with the style’s icons.
++      \since 6.33
++    */
++    property real labelVerticalOffset: 0
++    /*!
++      Text rendering mode of the message label.
++      \since 6.33
++    */
++    property alias messageRenderType: label.renderType
++    /*!
++      Icon of the dismiss button.
++      \since 6.33
++    */
++    property alias closeIcon: closeButton.icon
++
+     padding: Platform.Units.smallSpacing
+ 
+     Accessible.role: Accessible.AlertMessage
+@@ -285,7 +311,7 @@ T.Control {
+ 
+         Accessible.ignored: true
+ 
+-        readonly property real fixedContentWidth: icon.width + Platform.Units.largeSpacing + Platform.Units.smallSpacing * 2 + (root.showCloseButton ? closeButton.width + Platform.Units.smallSpacing : 0)
++        readonly property real fixedContentWidth: icon.width + root.iconLabelSpacing + root.leadingIconInset + Platform.Units.smallSpacing + (root.showCloseButton ? closeButton.width + Platform.Units.smallSpacing : 0)
+         readonly property real remainingWidth: width - fixedContentWidth - label.implicitWidth
+         readonly property bool multiline: remainingWidth <= 0 || atBottom
+         readonly property bool atBottom: (root.actions.length > 0) && (label.lineCount > 1 || actionsLayout.implicitWidth > remainingWidth)
+@@ -298,7 +324,7 @@ T.Control {
+ 
+             anchors {
+                 left: parent.left
+-                leftMargin: Platform.Units.smallSpacing
++                leftMargin: root.leadingIconInset
+                 topMargin: Platform.Units.smallSpacing
+             }
+ 
+@@ -363,10 +389,11 @@ T.Control {
+ 
+         KirigamiControls.SelectableLabel {
+             id: label
++            transform: Translate { y: root.labelVerticalOffset }
+ 
+             anchors {
+                 left: icon.right
+-                leftMargin: Platform.Units.largeSpacing
++                leftMargin: root.iconLabelSpacing
+                 top: parent.top
+                 bottom: parent.bottom
+             }

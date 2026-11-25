@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: LGPL-2.0-or-later
+set -eu
+project=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec qml6 -a widget "$project/Preview.qml"

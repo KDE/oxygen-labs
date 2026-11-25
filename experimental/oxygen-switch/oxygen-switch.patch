@@ -1,0 +1,326 @@
+diff --git a/oxygen/kstyle/oxygenstyle.cpp b/oxygen/kstyle/oxygenstyle.cpp
+index 3c2eb6c..971110d 100644
+--- a/oxygen/kstyle/oxygenstyle.cpp
++++ b/oxygen/kstyle/oxygenstyle.cpp
+@@ -199,6 +199,7 @@ Style::Style(void)
+     , _splitterFactory(new SplitterFactory(this))
+     , SH_ArgbDndWindow(newStyleHint(QStringLiteral("SH_ArgbDndWindow")))
+     , CE_CapacityBar(newControlElement(QStringLiteral("CE_CapacityBar")))
++    , CE_SwitchIndicator(newControlElement(QStringLiteral("CE_SwitchIndicator")))
+ {
+     // use DBus connection to update on oxygen configuration change
+     QDBusConnection dbus = QDBusConnection::sessionBus();
+@@ -1062,6 +1063,8 @@ void Style::drawControl(ControlElement element, const QStyleOption *option, QPai
+     StyleControl fcn(nullptr);
+     if (element == CE_CapacityBar) {
+         fcn = &Style::drawProgressBarControl;
++    } else if (element == CE_SwitchIndicator) {
++        fcn = &Style::drawSwitchIndicator;
+ 
+     } else
+         switch (element) {
+@@ -6965,6 +6968,82 @@ bool Style::drawSpinBoxComplexControl(const QStyleOptionComplex *option, QPainte
+ }
+ 
+ //______________________________________________________________
++static constexpr int switchHandleInset = 3;
++
++QSize Style::switchIndicatorSize() const
++{
++    return QSize(46, 26);
++}
++
++bool Style::drawSwitchIndicator(const QStyleOption *option, QPainter *painter, const QWidget *widget) const
++{
++    const auto *slider = qstyleoption_cast<const QStyleOptionSlider *>(option);
++    if (!slider || option->rect.isEmpty()) {
++        return false;
++    }
++
++    const QRect rect = option->rect;
++    const QPalette &palette = option->palette;
++    const bool enabled = option->state & State_Enabled;
++    const bool checked = option->state & State_On;
++    const QColor track = checked ? palette.color(enabled ? palette.currentColorGroup() : QPalette::Disabled, QPalette::Highlight) : palette.color(QPalette::Window);
++
++    const QRectF rim(rect);
++    const QRectF well = rim.adjusted(0.8, 0.8, -0.8, -0.8);
++    const QColor base = checked ? track : _helper->calcDarkColor(track);
++    const QColor shadow = _helper->calcShadowColor(track);
++    QLinearGradient lip(rim.topLeft(), rim.bottomLeft());
++    lip.setColorAt(0, KColorUtils::mix(base, shadow, 0.35));
++    lip.setColorAt(0.55, base);
++    lip.setColorAt(1, _helper->calcLightColor(track));
++
++    // Paint both contours at the target resolution, including fractional display scales.
++    painter->setRenderHint(QPainter::Antialiasing);
++    painter->setPen(Qt::NoPen);
++    painter->setBrush(lip);
++    painter->drawRoundedRect(rim, rim.height() / 2, rim.height() / 2);
++    if (!well.isEmpty()) {
++        QLinearGradient inset(well.topLeft(), well.bottomLeft());
++        inset.setColorAt(0, KColorUtils::mix(base, shadow, 0.38));
++        inset.setColorAt(0.14, KColorUtils::mix(base, shadow, 0.12));
++        inset.setColorAt(0.55, base);
++        inset.setColorAt(1, KColorUtils::mix(base, track, 0.18));
++        painter->setBrush(inset);
++        painter->drawRoundedRect(well, well.height() / 2, well.height() / 2);
++
++        constexpr qreal shadowWidth = 1.4;
++        const qreal halfWidth = shadowWidth / 2;
++        const QRectF edge = well.adjusted(halfWidth, halfWidth, -halfWidth, -halfWidth);
++        QLinearGradient edgeShadow(well.topLeft(), well.bottomLeft());
++        edgeShadow.setColorAt(0, _helper->alphaColor(shadow, 0.30));
++        edgeShadow.setColorAt(0.5, _helper->alphaColor(shadow, 0.14));
++        edgeShadow.setColorAt(1, _helper->alphaColor(shadow, 0.035));
++        painter->setPen(QPen(edgeShadow, shadowWidth));
++        painter->setBrush(Qt::NoBrush);
++        painter->drawRoundedRect(edge, edge.height() / 2, edge.height() / 2);
++    }
++
++    const QRect interior = rect.adjusted(switchHandleInset, switchHandleInset, -switchHandleInset, -switchHandleInset);
++    if (interior.isEmpty()) {
++        return true;
++    }
++    const int size = qMin(interior.width(), interior.height());
++    const int travel = interior.width() - size;
++    const int x = sliderPositionFromValue(slider->minimum, slider->maximum, slider->sliderPosition, travel);
++    const QRect handle(interior.left() + x, rect.top() + (rect.height() - size) / 2, size, size);
++    StyleOptions states;
++    if (enabled && (option->state & State_HasFocus)) {
++        states |= Focus;
++    }
++    if (enabled && (option->state & State_MouseOver)) {
++        states |= Hover;
++    }
++    const QColor color = _helper->backgroundColor(palette.color(QPalette::Button), widget, handle.center());
++    const QColor glow = _helper->buttonGlowColor(palette, states, -1, AnimationNone);
++    _helper->renderSwitchHandle(*painter, handle, color, glow, option->state & State_Sunken);
++    return true;
++}
++
+ bool Style::drawSliderComplexControl(const QStyleOptionComplex *option, QPainter *painter, const QWidget *widget) const
+ {
+     // cast option and check
+diff --git a/oxygen/kstyle/oxygenstyle.h b/oxygen/kstyle/oxygenstyle.h
+index 4966893..cb2919b 100644
+--- a/oxygen/kstyle/oxygenstyle.h
++++ b/oxygen/kstyle/oxygenstyle.h
+@@ -84,6 +84,12 @@ class Style : public KStyle
+     Q_CLASSINFO("X-KDE-CustomElements", "true")
+ 
+ public:
++    Q_PROPERTY(uint kdeSwitchControlElement READ switchControlElement CONSTANT)
++    Q_PROPERTY(QSize kdeSwitchIndicatorSize READ switchIndicatorSize CONSTANT)
++
++    uint switchControlElement() const { return CE_SwitchIndicator; }
++    QSize switchIndicatorSize() const;
++
+     //* constructor
+     explicit Style(void);
+ 
+@@ -677,6 +683,8 @@ private:
+ 
+     //* styled painting for KCapacityBar
+     QStyle::ControlElement CE_CapacityBar;
++    QStyle::ControlElement CE_SwitchIndicator;
++    bool drawSwitchIndicator(const QStyleOption *, QPainter *, const QWidget *) const;
+ 
+     //@}
+ 
+diff --git a/oxygen/kstyle/oxygenstylehelper.cpp b/oxygen/kstyle/oxygenstylehelper.cpp
+index a55b303..95183be 100644
+--- a/oxygen/kstyle/oxygenstylehelper.cpp
++++ b/oxygen/kstyle/oxygenstylehelper.cpp
+@@ -705,6 +705,34 @@ QPixmap StyleHelper::roundSlab(const QColor &color, const QColor &glow, qreal sh
+     return pixmap;
+ }
+ 
++//__________________________________________________________________________________________________________
++void StyleHelper::renderSwitchHandle(QPainter &painter, const QRectF &face, const QColor &color, const QColor &glow, bool sunken)
++{
++    painter.save();
++    const qreal radius = face.width() / 2;
++    const qreal spread = 0.72;
++    const QPointF center = face.center() + QPointF(0, sunken ? 0.2 : 0.52);
++    QRadialGradient contact(center, radius + spread);
++    const QColor shadow = calcShadowColor(color);
++    contact.setColorAt(radius / (radius + spread), alphaColor(shadow, 0.42));
++    contact.setColorAt(1, alphaColor(shadow, 0));
++    painter.setPen(Qt::NoPen);
++    painter.setBrush(contact);
++    painter.drawEllipse(center, radius + spread, radius + spread);
++    if (glow.isValid()) {
++        painter.setBrush(Qt::NoBrush);
++        painter.setPen(QPen(glow, 1.2));
++        painter.drawEllipse(face.adjusted(-0.4, -0.4, 0.4, 0.4));
++    }
++
++    // The slider face occupies (3, 3, 15, 15) in the slab's logical coordinates.
++    painter.translate(face.topLeft());
++    painter.scale(face.width() / 15, face.height() / 15);
++    painter.translate(-3, -3);
++    drawSliderSlab(painter, color, sunken, 0);
++    painter.restore();
++}
++
+ //__________________________________________________________________________________________________________
+ QPixmap StyleHelper::sliderSlab(const QColor &color, const QColor &glow, bool sunken, qreal shade, qreal dpr, int size)
+ {
+diff --git a/oxygen/kstyle/oxygenstylehelper.h b/oxygen/kstyle/oxygenstylehelper.h
+index 907d3d2..9a78dd5 100644
+--- a/oxygen/kstyle/oxygenstylehelper.h
++++ b/oxygen/kstyle/oxygenstylehelper.h
+@@ -162,6 +162,7 @@ public:
+     QPixmap roundSlab(const QColor &, const QColor &glow, qreal shade, qreal dpr, int size = TileSet::DefaultSize);
+ 
+     //* slider slab
++    void renderSwitchHandle(QPainter &, const QRectF &, const QColor &color, const QColor &glow, bool sunken);
+     QPixmap sliderSlab(const QColor &, const QColor &glow, bool sunken, qreal shade, qreal dpr, int size = TileSet::DefaultSize);
+ 
+     //@}
+diff --git a/qqc2-desktop-style/org.kde.desktop/private/SwitchIndicator.qml b/qqc2-desktop-style/org.kde.desktop/private/SwitchIndicator.qml
+index 5db68dd..f443aa6 100644
+--- a/qqc2-desktop-style/org.kde.desktop/private/SwitchIndicator.qml
++++ b/qqc2-desktop-style/org.kde.desktop/private/SwitchIndicator.qml
+@@ -6,13 +6,15 @@
+ */
+ 
+ import QtQuick
++import org.kde.qqc2desktopstyle.private as StylePrivate
+ import QtQuick.Templates as T
+ import org.kde.kirigami as Kirigami
+ 
+ Item {
+     id: indicator
+-    implicitWidth: implicitHeight * 2
+-    implicitHeight: Kirigami.Units.gridUnit
++    readonly property bool nativeIndicator: nativeItem.switchIndicatorSize.width > 0 && nativeItem.switchIndicatorSize.height > 0
++    implicitWidth: nativeIndicator ? nativeItem.switchIndicatorSize.width : implicitHeight * 2
++    implicitHeight: nativeIndicator ? nativeItem.switchIndicatorSize.height : Kirigami.Units.gridUnit
+     layer.enabled: control.opacity < 1.0
+ 
+     property T.AbstractButton control
+@@ -35,8 +37,29 @@ Item {
+         }
+     }
+ 
++    StylePrivate.StyleItem {
++        id: nativeItem
++        anchors.fill: parent
++        control: indicator.control
++        elementType: "switchindicator"
++        visible: indicator.nativeIndicator
++        hover: indicator.control.hovered
++        hasFocus: indicator.control.visualFocus
++        sunken: indicator.control.down
++        on: indicator.control.checked
++        horizontal: true
++        minimum: 0
++        maximum: 1000
++        value: Math.round(indicator.control.visualPosition * maximum)
++        Behavior on value {
++            enabled: nativeItem.visible && !indicator.control.pressed && Kirigami.Units.shortDuration > 0
++            NumberAnimation { duration: Kirigami.Units.shortDuration; easing.type: Easing.OutCubic }
++        }
++    }
++
+     Rectangle {
+         id: inactive
++        visible: !indicator.nativeIndicator
+ 
+         anchors {
+             fill: parent
+@@ -51,6 +74,7 @@ Item {
+     }
+ 
+     Rectangle {
++        visible: !indicator.nativeIndicator
+         anchors {
+             left: inactive.left
+             top: inactive.top
+@@ -64,6 +88,7 @@ Item {
+ 
+     Rectangle {
+         id: handle
++        visible: !indicator.nativeIndicator
+ 
+         x: Math.max(0, Math.min(parent.width - width, indicator.control.visualPosition * parent.width - (width / 2)))
+ 
+diff --git a/qqc2-desktop-style/plugin/kquickstyleitem.cpp b/qqc2-desktop-style/plugin/kquickstyleitem.cpp
+index 892b791..4059462 100644
+--- a/qqc2-desktop-style/plugin/kquickstyleitem.cpp
++++ b/qqc2-desktop-style/plugin/kquickstyleitem.cpp
+@@ -709,6 +709,7 @@ void KQuickStyleItem::initStyleOption()
+         }
+         break;
+     }
++    case SwitchIndicator:
+     case Slider:
+     case Dial: {
+         if (!m_styleoption) {
+@@ -1044,6 +1045,12 @@ QString KQuickStyleItem::styleName() const
+     return shortName.toString().toLower();
+ }
+ 
++QSize KQuickStyleItem::switchIndicatorSize() const
++{
++    QStyle *current = style();
++    return current->property("kdeSwitchControlElement").toUInt() ? current->property("kdeSwitchIndicatorSize").toSize() : QSize();
++}
++
+ QString KQuickStyleItem::hitTest(int px, int py)
+ {
+     QStyle::SubControl subcontrol = QStyle::SC_All;
+@@ -1610,6 +1617,8 @@ void KQuickStyleItem::setElementType(const QString &str)
+         m_itemType = ToolBar;
+     } else if (str == QLatin1String("toolbutton")) {
+         m_itemType = ToolButton;
++    } else if (str == QLatin1String("switchindicator")) {
++        m_itemType = SwitchIndicator;
+     } else if (str == QLatin1String("slider")) {
+         m_itemType = Slider;
+     } else if (str == QLatin1String("frame")) {
+@@ -1818,6 +1827,14 @@ void KQuickStyleItem::paint(QPainter *painter)
+     case MacHelpButton:
+         // Not managed as mac is not supported
+         break;
++    case SwitchIndicator: {
++        // The slider option carries the physical handle position, including RTL.
++        const uint element = style()->property("kdeSwitchControlElement").toUInt();
++        if (element) {
++            style()->drawControl(static_cast<QStyle::ControlElement>(element), m_styleoption, painter);
++        }
++        break;
++    }
+     case Widget:
+         KQuickStyleItem::style()->drawPrimitive(QStyle::PE_Widget, m_styleoption, painter);
+         break;
+diff --git a/qqc2-desktop-style/plugin/kquickstyleitem_p.h b/qqc2-desktop-style/plugin/kquickstyleitem_p.h
+index 022cd7b..215aec6 100644
+--- a/qqc2-desktop-style/plugin/kquickstyleitem_p.h
++++ b/qqc2-desktop-style/plugin/kquickstyleitem_p.h
+@@ -67,6 +67,7 @@ class KQuickStyleItem : public QQuickItem
+     Q_PROPERTY(QString text READ text WRITE setText NOTIFY textChanged)
+     Q_PROPERTY(QString activeControl READ activeControl WRITE setActiveControl NOTIFY activeControlChanged)
+     Q_PROPERTY(QString styleName READ styleName NOTIFY styleNameChanged)
++    Q_PROPERTY(QSize switchIndicatorSize READ switchIndicatorSize NOTIFY styleNameChanged)
+     Q_PROPERTY(QVariantMap hints READ hints WRITE setHints NOTIFY hintChanged RESET resetHints)
+     Q_PROPERTY(QVariantMap properties READ properties WRITE setProperties NOTIFY propertiesChanged)
+     Q_PROPERTY(QFont font READ font WRITE setFont RESET resetFont NOTIFY fontChanged)
+@@ -124,6 +125,7 @@ public:
+         FocusRect,
+         SpinBox,
+         Slider,
++        SwitchIndicator,
+         ScrollBar,
+         ProgressBar,
+         Edit,
+@@ -233,6 +235,7 @@ public:
+         return m_font;
+     }
+     QString styleName() const;
++    QSize switchIndicatorSize() const;
+ 
+     void setSunken(bool sunken)
+     {
